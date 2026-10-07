@@ -19,11 +19,14 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.util import dt as dt_util
 
+from .const import DOMAIN
 from .coordinator import PanOSConfigEntry
 from .entity import PanOSPairEntity, PanOSUnitEntity, PanOSUpdatesEntity
 from .parsers import HA_STATES
 
 Data = dict[str, Any]
+
+BRAND_ICON = f"/api/brands/integration/{DOMAIN}/icon.png"
 
 
 def _get(data: Data | None, section: str, key: str) -> Any:
@@ -42,6 +45,8 @@ class PanOSSensorDescription(SensorEntityDescription):
     exists_fn: Callable[[Data | None, bool], bool] = lambda data, paired: True
     # Also expose on the HA-pair device, following the active unit.
     on_pair: bool = False
+    # Show the Palo Alto Networks brand icon instead of an MDI icon.
+    brand_picture: bool = False
 
 
 def _ha_local_state(data: Data) -> str | None:
@@ -264,6 +269,7 @@ UNIT_SENSORS: tuple[PanOSSensorDescription, ...] = (
             icon=icon,
             entity_category=EntityCategory.DIAGNOSTIC,
             entity_registry_enabled_default=enabled,
+            brand_picture=key == "app_version",
             value_fn=lambda d, k=key: _get(d, "system", k),
         )
         for key, name, icon, enabled in (
@@ -341,6 +347,13 @@ async def async_setup_entry(
 
 class PanOSUnitSensor(PanOSUnitEntity, SensorEntity):
     entity_description: PanOSSensorDescription
+
+    def __init__(self, entry, unit, description: PanOSSensorDescription) -> None:
+        super().__init__(entry, unit, description)
+        if description.brand_picture:
+            # Same brand-proxy path update entities use (HA 2026.3+), served
+            # from this integration's brand/ folder.
+            self._attr_entity_picture = BRAND_ICON
 
     @property
     def native_value(self) -> Any:
