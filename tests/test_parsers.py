@@ -50,3 +50,5 @@ def test_versions_and_licenses():
     lic = parsers.parse_licenses(parse_response(fakefw.LICENSES))
     assert lic["next_expiry"] == date(2026, 11, 5)
     assert lic["next_expiry_feature"] == "Threat Prevention"
+    assert lic["expired"] == []  # expired warranty is ignored
+    assert all("warranty" not in l["feature"].lower() for l in lic["licenses"])

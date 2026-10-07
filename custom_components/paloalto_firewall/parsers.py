@@ -387,6 +387,10 @@ def _parse_license_date(value: str | None) -> date | None:
 def parse_licenses(result: ET.Element) -> dict[str, Any]:
     licenses = []
     for e in result.findall("licenses/entry"):
+        # The hardware/software warranty is listed alongside subscriptions but
+        # is not a licence; its expiry shouldn't raise a problem.
+        if "warranty" in (_text(e, "feature") or "").lower():
+            continue
         licenses.append(
             {
                 "feature": _text(e, "feature") or "?",

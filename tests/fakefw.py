@@ -69,6 +69,7 @@ CONTENT = OK.format("""<content-updates last-updated-at="2026/10/07"><entry><ver
 
 LICENSES = OK.format("""<licenses><entry><feature>Threat Prevention</feature><description>Threat</description><issued>October 01, 2024</issued><expires>November 05, 2026</expires><expired>no</expired></entry>
 <entry><feature>PAN-DB URL Filtering</feature><issued>October 01, 2024</issued><expires>March 01, 2027</expires><expired>no</expired></entry>
+<entry><feature>Software warranty</feature><description>90 days for software warranty</description><issued>July 29, 2022</issued><expires>October 29, 2022</expires><expired>yes</expired></entry>
 <entry><feature>Standard</feature><issued>October 01, 2024</issued><expires>Never</expires><expired>no</expired></entry></licenses>""")
 
 
