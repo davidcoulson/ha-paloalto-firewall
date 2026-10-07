@@ -1,0 +1,86 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Palo Alto Networks firewall",
+        "description": "Use the management IP or hostname of each firewall (not a dataplane/floating address). For an active/passive pair enter both; leave the second blank for a standalone firewall. The account needs XML API access with Operational Requests.",
+        "data": {
+          "name": "Name",
+          "primary_host": "Firewall 1 management address",
+          "secondary_host": "Firewall 2 management address (HA peer)",
+          "username": "Username",
+          "password": "Password",
+          "verify_ssl": "Verify TLS certificate"
+        },
+        "data_description": {
+          "primary_host": "Host or IP, optionally with :port.",
+          "secondary_host": "Leave empty for a standalone firewall."
+        }
+      },
+      "reauth_confirm": {
+        "title": "Re-authenticate",
+        "description": "The firewall rejected the stored credentials.",
+        "data": {
+          "username": "Username",
+          "password": "Password"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Could not reach {host}.",
+      "invalid_auth": "{host} rejected the username or password.",
+      "same_device": "Both addresses point at the same firewall.",
+      "unknown": "Unexpected error, see the log."
+    },
+    "abort": {
+      "already_configured": "This firewall or pair is already configured.",
+      "reauth_successful": "Re-authentication was successful."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Polling",
+        "data": {
+          "scan_interval": "Status poll interval",
+          "update_check_hours": "Update and licence check interval"
+        },
+        "data_description": {
+          "update_check_hours": "Each check contacts the Palo Alto update server from both firewalls."
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "ha_state": {
+        "state": {
+          "standalone": "Standalone",
+          "initial": "Initial",
+          "active": "Active",
+          "passive": "Passive",
+          "active-primary": "Active-primary",
+          "active-secondary": "Active-secondary",
+          "tentative": "Tentative",
+          "non-functional": "Non-functional",
+          "suspended": "Suspended",
+          "unknown": "Unknown"
+        }
+      },
+      "ha_peer_state": {
+        "state": {
+          "standalone": "Standalone",
+          "initial": "Initial",
+          "active": "Active",
+          "passive": "Passive",
+          "active-primary": "Active-primary",
+          "active-secondary": "Active-secondary",
+          "tentative": "Tentative",
+          "non-functional": "Non-functional",
+          "suspended": "Suspended",
+          "unknown": "Unknown"
+        }
+      }
+    }
+  }
+}
