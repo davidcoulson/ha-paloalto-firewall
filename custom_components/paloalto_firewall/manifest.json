@@ -1,13 +1,13 @@
 {
   "domain": "paloalto_firewall",
   "name": "Palo Alto Networks Firewall",
-  "codeowners": [],
+  "codeowners": ["@davidcoulson"],
   "config_flow": true,
   "dependencies": [],
-  "documentation": "https://github.com/your-github/ha-paloalto-firewall",
+  "documentation": "https://github.com/davidcoulson/ha-paloalto-firewall",
   "integration_type": "hub",
   "iot_class": "local_polling",
-  "issue_tracker": "https://github.com/your-github/ha-paloalto-firewall/issues",
+  "issue_tracker": "https://github.com/davidcoulson/ha-paloalto-firewall/issues",
   "requirements": [],
   "version": "0.1.0"
 }
