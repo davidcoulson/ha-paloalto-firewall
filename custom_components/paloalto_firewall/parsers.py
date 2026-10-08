@@ -518,7 +518,9 @@ def parse_dhcp_leases(result: ET.Element) -> list[dict[str, Any]]:
             mac = _clean_mac(_text(e, "mac"))
             if not ip or not mac:
                 continue
-            expires = " ".join((_text(e, "leasetime") or "").split()) or None
+            # PAN-OS 'leasetime' is when the lease was granted/renewed, not
+            # when it expires; report it as-is with the lease duration.
+            lease_time = " ".join((_text(e, "leasetime") or "").split()) or None
             leases.append(
                 {
                     "ip": ip,
@@ -526,7 +528,8 @@ def parse_dhcp_leases(result: ET.Element) -> list[dict[str, Any]]:
                     "hostname": _text(e, "hostname"),
                     "interface": name,
                     "lease_state": _text(e, "state"),
-                    "lease_expires": expires,
+                    "lease_time": lease_time,
+                    "lease_duration": _int(_text(e, "duration")),
                 }
             )
     return leases

@@ -60,7 +60,9 @@ def test_lookup_parsing_and_matching():
     assert arp[2]["mac"] is None
     dhcp = parsers.parse_dhcp_leases(parse_response(fakefw.DHCP))
     assert dhcp[0]["interface"] == "ethernet1/2.30"
-    assert dhcp[0]["lease_expires"] == "Fri Oct 9 02:14:00 2026"
+    assert dhcp[0]["lease_time"] == "Fri Oct 9 02:14:00 2026"
+    assert dhcp[0]["lease_duration"] == 86400
+    assert "lease_expires" not in dhcp[0]
 
     hosts = parsers.merge_hosts(arp, dhcp)
     assert [h["ip"] for h in hosts] == ["10.2.3.6", "10.2.3.45", "10.2.3.99", "10.2.3.120", "10.2.4.1"]

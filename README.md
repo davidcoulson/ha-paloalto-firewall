@@ -100,7 +100,8 @@ matches:
     hostname: shelly-plug-kitchen
     interface: ethernet1/2.30
     lease_state: committed
-    lease_expires: Fri Oct 9 02:14:00 2026   # firewall's local time, as reported
+    lease_time: Fri Oct 8 02:14:00 2026   # when the lease was granted/renewed (firewall local time)
+    lease_duration: 86400                 # seconds
     arp_status: complete
     arp_ttl: 1200
 ```
