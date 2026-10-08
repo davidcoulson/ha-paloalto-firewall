@@ -72,6 +72,19 @@ LICENSES = OK.format("""<licenses><entry><feature>Threat Prevention</feature><de
 <entry><feature>Software warranty</feature><description>90 days for software warranty</description><issued>July 29, 2022</issued><expires>October 29, 2022</expires><expired>yes</expired></entry>
 <entry><feature>Standard</feature><issued>October 01, 2024</issued><expires>Never</expires><expired>no</expired></entry></licenses>""")
 
+ARP = OK.format("""<max>1500</max><total>4</total><timeout>1800</timeout><dp>dp0</dp><entries>
+<entry><status>  c  </status><ip>10.2.3.45</ip><mac>00:11:22:aa:bb:cc</mac><ttl>1200</ttl><interface>ethernet1/2.30</interface><port>ethernet1/2</port></entry>
+<entry><status>  c  </status><ip>10.2.3.6</ip><mac>bc:24:11:00:00:06</mac><ttl>1700</ttl><interface>ethernet1/2.30</interface><port>ethernet1/2</port></entry>
+<entry><status>  i  </status><ip>10.2.3.99</ip><mac>(incomplete)</mac><ttl>3</ttl><interface>ethernet1/2.30</interface><port>ethernet1/2</port></entry>
+<entry><status>  s  </status><ip>10.2.4.1</ip><mac>de:ad:be:ef:00:01</mac><ttl>0</ttl><interface>ethernet1/3</interface><port>ethernet1/3</port></entry>
+</entries>""")
+
+DHCP = OK.format("""<interface name="ethernet1/2.30"><allocated>3</allocated><total>200</total>
+<entry name="10.2.3.45"><ip>10.2.3.45</ip><mac>00:11:22:aa:bb:cc</mac><hostname>shelly-plug-kitchen</hostname><state>committed</state><duration>86400</duration><leasetime>Fri Oct  9 02:14:00 2026</leasetime></entry>
+<entry name="10.2.3.99"><ip>10.2.3.99</ip><mac>00:11:22:dd:ee:ff</mac><hostname>esp-garage</hostname><state>committed</state><duration>86400</duration><leasetime>Fri Oct  9 07:00:00 2026</leasetime></entry>
+<entry name="10.2.3.120"><ip>10.2.3.120</ip><mac>aa:bb:cc:33:44:55</mac><hostname>iphone</hostname><state>expired</state><duration>86400</duration><leasetime>Wed Oct  7 09:00:00 2026</leasetime></entry>
+</interface>""")
+
 
 class FakePair:
     """State for two firewalls; tests mutate it to simulate failover/outage."""
@@ -82,11 +95,13 @@ class FakePair:
             "fw2.lan": {"hostname": "fw2", "serial": "0123456789002", "state": "passive", "up": True},
         }
         self.bad_password = False
+        self.calls: list[tuple[str, str]] = []
 
     def peer(self, host):
         return next(u for h, u in self.units.items() if h != host)
 
     def respond(self, host, cmd):
+        self.calls.append((host, cmd))
         unit = self.units[host]
         if not unit["up"]:
             raise PanOSConnectionError(f"{host} down")
@@ -109,6 +124,8 @@ class FakePair:
             const.CMD_SOFTWARE_CHECK: SOFTWARE,
             const.CMD_CONTENT_CHECK: CONTENT,
             const.CMD_LICENSE_INFO: LICENSES,
+            const.CMD_ARP_ALL: ARP,
+            const.CMD_DHCP_LEASES: DHCP,
         }
         return parse_response(table[cmd])
 

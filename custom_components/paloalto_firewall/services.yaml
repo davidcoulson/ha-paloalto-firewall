@@ -1,0 +1,19 @@
+lookup:
+  fields:
+    query:
+      example: "00:11:22"
+      selector:
+        text:
+    source:
+      default: all
+      selector:
+        select:
+          translation_key: lookup_source
+          options:
+            - all
+            - arp
+            - dhcp
+    config_entry_id:
+      selector:
+        config_entry:
+          integration: paloalto_firewall

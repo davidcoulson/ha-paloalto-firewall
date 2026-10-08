@@ -6,6 +6,7 @@ own. Every parser takes the <result> element of a successful API response.
 
 from __future__ import annotations
 
+import ipaddress
 import re
 import xml.etree.ElementTree as ET
 from datetime import date, datetime
@@ -462,3 +463,115 @@ def latest_content(versions: list[dict[str, Any]]) -> dict[str, Any] | None:
     if not parsed:
         return None
     return max(parsed, key=lambda p: p[0])[1]
+
+
+# --------------------------------------------------------------------------
+# ARP table and DHCP leases (host lookup)
+# --------------------------------------------------------------------------
+
+ARP_STATUS = {"s": "static", "c": "complete", "e": "expiring", "i": "incomplete"}
+
+_NON_HEX = re.compile(r"[^0-9a-f]")
+_MAC_QUERY = re.compile(
+    r"^(?:[0-9a-f]{2}(?:[:-][0-9a-f]{2})*[:-]?"  # 00:11:22 / 00-11-22
+    r"|[0-9a-f]{4}(?:\.[0-9a-f]{4}){0,2}"  # 0011.2233.4455
+    r"|[0-9a-f]{12})$"
+)
+
+
+def normalize_mac(mac: str | None) -> str:
+    return _NON_HEX.sub("", (mac or "").lower())
+
+
+def _clean_mac(mac: str | None) -> str | None:
+    if not mac or len(normalize_mac(mac)) != 12:
+        return None  # "(incomplete)" and similar
+    return mac.lower()
+
+
+def parse_arp(result: ET.Element) -> list[dict[str, Any]]:
+    entries = []
+    for e in result.findall("entries/entry"):
+        ip = _text(e, "ip")
+        if not ip:
+            continue
+        status = (_text(e, "status") or "").lower()
+        entries.append(
+            {
+                "ip": ip,
+                "mac": _clean_mac(_text(e, "mac")),
+                "interface": _text(e, "interface"),
+                "arp_status": ARP_STATUS.get(status, status or None),
+                "arp_ttl": _int(_text(e, "ttl")),
+            }
+        )
+    return entries
+
+
+def parse_dhcp_leases(result: ET.Element) -> list[dict[str, Any]]:
+    leases = []
+    interfaces = result.findall("interface") or [result]
+    for iface in interfaces:
+        name = iface.get("name") or _text(iface, "name")
+        for e in iface.iter("entry"):
+            ip = _text(e, "ip") or e.get("name")
+            mac = _clean_mac(_text(e, "mac"))
+            if not ip or not mac:
+                continue
+            expires = " ".join((_text(e, "leasetime") or "").split()) or None
+            leases.append(
+                {
+                    "ip": ip,
+                    "mac": mac,
+                    "hostname": _text(e, "hostname"),
+                    "interface": name,
+                    "lease_state": _text(e, "state"),
+                    "lease_expires": expires,
+                }
+            )
+    return leases
+
+
+def merge_hosts(
+    arp: list[dict[str, Any]], dhcp: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Combine ARP entries and DHCP leases describing the same IP+MAC."""
+    hosts: dict[tuple[str, str], dict[str, Any]] = {}
+    for source, records in (("dhcp", dhcp), ("arp", arp)):
+        for rec in records:
+            mac = rec.get("mac") or ""
+            key = (rec["ip"], mac)
+            if not mac:
+                # Incomplete ARP entry: attach to a lease for the same IP.
+                key = next((k for k in hosts if k[0] == rec["ip"]), key)
+            host = hosts.setdefault(key, {"ip": rec["ip"], "mac": rec.get("mac"), "sources": []})
+            if source not in host["sources"]:
+                host["sources"].append(source)
+            for field, value in rec.items():
+                if value is not None and host.get(field) is None:
+                    host[field] = value
+    return sorted(hosts.values(), key=_ip_sort_key)
+
+
+def _ip_sort_key(host: dict[str, Any]) -> tuple:
+    try:
+        addr = ipaddress.ip_address(host["ip"])
+        return (addr.version, int(addr), host.get("mac") or "")
+    except ValueError:
+        return (9, 0, host["ip"])
+
+
+def host_matches(host: dict[str, Any], query: str) -> bool:
+    q = query.strip().lower()
+    if not q:
+        return True
+    try:
+        return host["ip"] == str(ipaddress.ip_address(q))
+    except ValueError:
+        pass
+    if _MAC_QUERY.match(q) and host.get("mac") and normalize_mac(q) in normalize_mac(host["mac"]):
+        return True
+    return any(
+        q in str(host.get(field) or "").lower()
+        for field in ("ip", "mac", "hostname", "interface")
+    )

@@ -75,6 +75,38 @@ actions:
 
 `request system software check` and `request content upgrade check` run every 6 hours per unit (configurable) and in the background at startup. The **PAN-OS** update entity tracks the newest release **in your installed feature train** (e.g. 11.1.x) — moving to a new train is a planning decision, so the newest release overall is shown in the `newest_release_any_train` attribute instead. Update entities are read-only; nothing is downloaded or installed.
 
+## Look up a host (ARP / DHCP)
+
+The `paloalto_firewall.lookup` action searches the **active** firewall's ARP table and DHCP leases (falling back to the peer if the active unit can't be reached) and returns the matches. Run it from **Developer Tools → Actions**, or from a script:
+
+```yaml
+action: paloalto_firewall.lookup
+data:
+  query: "00:11:22"   # optional; empty returns everything
+  source: all         # all | arp | dhcp
+response_variable: result
+```
+
+`query` matches a full IP exactly, a MAC address in full or in part with any separator (`00:11:22`, `00-11-22`, `0011.22aa`), or any part of an IP, hostname or interface name. ARP entries and DHCP leases for the same IP and MAC are merged into one result:
+
+```yaml
+firewall: fw1
+query: "00:11:22"
+count: 1
+matches:
+  - ip: 10.2.3.45
+    mac: 00:11:22:aa:bb:cc
+    sources: [dhcp, arp]
+    hostname: shelly-plug-kitchen
+    interface: ethernet1/2.30
+    lease_state: committed
+    lease_expires: Fri Oct 9 02:14:00 2026   # firewall's local time, as reported
+    arp_status: complete
+    arp_ttl: 1200
+```
+
+If one table can't be read (for example, no DHCP server is configured), the other is still returned and the problem is listed under `errors`.
+
 ## Icons
 
 The Palo Alto Networks icon and logo ship in `custom_components/paloalto_firewall/brand/` (Home Assistant 2026.3+ serves them locally). They're used for the integration tile, the PAN-OS and Apps & threats update entities, and the Apps & threats version sensor.

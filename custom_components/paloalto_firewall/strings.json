@@ -82,5 +82,34 @@
         }
       }
     }
+  },
+  "services": {
+    "lookup": {
+      "name": "Look up host",
+      "description": "Search the active firewall's ARP table and DHCP leases by IP, MAC or hostname. Returns the matching entries.",
+      "fields": {
+        "query": {
+          "name": "Search",
+          "description": "IP address (exact), MAC address (full or partial, any separator), hostname or interface. Leave empty to return everything."
+        },
+        "source": {
+          "name": "Source",
+          "description": "Which tables to search."
+        },
+        "config_entry_id": {
+          "name": "Firewall",
+          "description": "Only needed if more than one firewall or pair is configured."
+        }
+      }
+    }
+  },
+  "selector": {
+    "lookup_source": {
+      "options": {
+        "all": "ARP table and DHCP leases",
+        "arp": "ARP table only",
+        "dhcp": "DHCP leases only"
+      }
+    }
   }
 }

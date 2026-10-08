@@ -205,3 +205,53 @@ async def test_clean_failover_and_split_brain(hass: HomeAssistant, fake) -> None
     problem = hass.states.get("binary_sensor.edge_ha_pair_ha_pair_problem")
     assert problem.state == "on"
     assert "both firewalls active (split brain)" in problem.attributes["problems"]
+
+
+async def test_lookup_action(hass: HomeAssistant, fake) -> None:
+    entry = await _setup(hass, fake)
+    # Make fw2 the active unit; the lookup must go to it.
+    fake.units["fw1.lan"]["state"] = "passive"
+    fake.units["fw2.lan"]["state"] = "active"
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=61))
+    await hass.async_block_till_done(wait_background_tasks=True)
+    fake.calls.clear()
+
+    result = await hass.services.async_call(
+        DOMAIN, "lookup", {"query": "00:11:22"}, blocking=True, return_response=True
+    )
+    assert result["firewall"] == "fw2"
+    assert result["count"] == 2
+    assert result["matches"][0]["hostname"] == "shelly-plug-kitchen"
+    assert {h for h, _ in fake.calls} == {"fw2.lan"}
+
+    result = await hass.services.async_call(
+        DOMAIN, "lookup", {"query": "garage", "source": "dhcp", "config_entry_id": entry.entry_id},
+        blocking=True, return_response=True,
+    )
+    assert [m["ip"] for m in result["matches"]] == ["10.2.3.99"]
+    assert result["matches"][0]["sources"] == ["dhcp"]
+
+    # Active unit unreachable: falls back to the peer.
+    fake.units["fw2.lan"]["up"] = False
+    result = await hass.services.async_call(
+        DOMAIN, "lookup", {"query": "10.2.4.1"}, blocking=True, return_response=True
+    )
+    assert result["firewall"] == "fw1" and result["count"] == 1
+
+    fake.units["fw1.lan"]["up"] = False
+    from homeassistant.exceptions import HomeAssistantError
+    with pytest.raises(HomeAssistantError):
+        await hass.services.async_call(
+            DOMAIN, "lookup", {"query": "x"}, blocking=True, return_response=True
+        )
+
+
+async def test_lookup_requires_loaded_entry(hass: HomeAssistant, fake) -> None:
+    from homeassistant.exceptions import ServiceValidationError
+    from homeassistant.setup import async_setup_component
+
+    assert await async_setup_component(hass, DOMAIN, {})
+    with pytest.raises(ServiceValidationError):
+        await hass.services.async_call(
+            DOMAIN, "lookup", {"query": "x"}, blocking=True, return_response=True
+        )

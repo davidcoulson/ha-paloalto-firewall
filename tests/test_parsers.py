@@ -52,3 +52,33 @@ def test_versions_and_licenses():
     assert lic["next_expiry_feature"] == "Threat Prevention"
     assert lic["expired"] == []  # expired warranty is ignored
     assert all("warranty" not in l["feature"].lower() for l in lic["licenses"])
+
+
+def test_lookup_parsing_and_matching():
+    arp = parsers.parse_arp(parse_response(fakefw.ARP))
+    assert [a["arp_status"] for a in arp] == ["complete", "complete", "incomplete", "static"]
+    assert arp[2]["mac"] is None
+    dhcp = parsers.parse_dhcp_leases(parse_response(fakefw.DHCP))
+    assert dhcp[0]["interface"] == "ethernet1/2.30"
+    assert dhcp[0]["lease_expires"] == "Fri Oct 9 02:14:00 2026"
+
+    hosts = parsers.merge_hosts(arp, dhcp)
+    assert [h["ip"] for h in hosts] == ["10.2.3.6", "10.2.3.45", "10.2.3.99", "10.2.3.120", "10.2.4.1"]
+    kitchen = hosts[1]
+    assert kitchen["sources"] == ["dhcp", "arp"] and kitchen["hostname"] == "shelly-plug-kitchen"
+    assert kitchen["arp_status"] == "complete"
+    garage = hosts[2]  # incomplete ARP merged into the lease for the same IP
+    assert garage["mac"] == "00:11:22:dd:ee:ff" and garage["arp_status"] == "incomplete"
+
+    def find(q):
+        return [h["ip"] for h in hosts if parsers.host_matches(h, q)]
+
+    assert find("10.2.3.45") == ["10.2.3.45"]  # exact IP, not 10.2.3.45x
+    assert find("10.2.3.4") == []  # full IP means exact
+    assert find("10.2.4") == ["10.2.4.1"]  # partial IP is a substring
+    assert find("00:11:22") == ["10.2.3.45", "10.2.3.99"]
+    assert find("0011.22aa") == ["10.2.3.45"]  # Cisco-style
+    assert find("00-11-22-AA-BB-CC") == ["10.2.3.45"]
+    assert find("KITCHEN") == ["10.2.3.45"]
+    assert find("ethernet1/3") == ["10.2.4.1"]
+    assert len(find("")) == 5

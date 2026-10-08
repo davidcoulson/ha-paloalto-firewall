@@ -41,6 +41,13 @@ CMD_IPSEC_SA = "<show><vpn><ipsec-sa></ipsec-sa></vpn></show>"
 CMD_SOFTWARE_CHECK = "<request><system><software><check></check></software></system></request>"
 CMD_CONTENT_CHECK = "<request><content><upgrade><check></check></upgrade></content></request>"
 CMD_LICENSE_INFO = "<request><license><info></info></license></request>"
+CMD_ARP_ALL = "<show><arp><entry name='all'/></arp></show>"
+CMD_DHCP_LEASES = (
+    "<show><dhcp><server><lease><interface>all</interface></lease></server></dhcp></show>"
+)
+
+SERVICE_LOOKUP = "lookup"
+LOOKUP_TIMEOUT = 60
 
 UPDATE_CHECK_TIMEOUT = 120
 
