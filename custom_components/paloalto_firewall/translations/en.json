@@ -101,6 +101,56 @@
           "description": "Only needed if more than one firewall or pair is configured."
         }
       }
+    },
+    "test_security_policy": {
+      "name": "Test security policy",
+      "description": "Ask the firewall which security rule would match the given traffic (same as the CLI 'test security-policy-match'). Returns the matching rule and its action.",
+      "fields": {
+        "source": {
+          "name": "Source IP",
+          "description": "Source IP address."
+        },
+        "destination": {
+          "name": "Destination IP",
+          "description": "Destination IP address."
+        },
+        "protocol": {
+          "name": "Protocol",
+          "description": "tcp, udp, icmp, or an IP protocol number."
+        },
+        "destination_port": {
+          "name": "Destination port",
+          "description": "Destination port (TCP/UDP)."
+        },
+        "from_zone": {
+          "name": "Source zone",
+          "description": "Source zone. Recommended: without it the firewall may consider rules for any zone."
+        },
+        "to_zone": {
+          "name": "Destination zone",
+          "description": "Destination zone."
+        },
+        "application": {
+          "name": "Application",
+          "description": "App-ID name, e.g. ssl, web-browsing, dns."
+        },
+        "source_user": {
+          "name": "Source user",
+          "description": "User-ID user, e.g. domain\\user."
+        },
+        "category": {
+          "name": "URL category",
+          "description": "URL category name."
+        },
+        "show_all": {
+          "name": "Show all matches",
+          "description": "Return every potentially matching rule up to the first allow, not just the first one."
+        },
+        "config_entry_id": {
+          "name": "Firewall",
+          "description": "Only needed if more than one firewall or pair is configured."
+        }
+      }
     }
   },
   "selector": {

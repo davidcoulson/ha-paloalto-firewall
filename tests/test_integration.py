@@ -255,3 +255,34 @@ async def test_lookup_requires_loaded_entry(hass: HomeAssistant, fake) -> None:
         await hass.services.async_call(
             DOMAIN, "lookup", {"query": "x"}, blocking=True, return_response=True
         )
+
+
+async def test_security_policy_action(hass: HomeAssistant, fake) -> None:
+    from homeassistant.exceptions import HomeAssistantError
+
+    await _setup(hass, fake)
+    fake.calls.clear()
+    result = await hass.services.async_call(
+        DOMAIN, "test_security_policy",
+        {"source": "10.2.4.86", "destination": "1.1.1.1", "destination_port": 443,
+         "protocol": "tcp", "from_zone": "iot", "to_zone": "untrust"},
+        blocking=True, return_response=True,
+    )
+    assert result["firewall"] == "fw1"  # the active unit
+    assert result["matched"] is True
+    assert result["rule"] == "IoT-to-Internet" and result["action"] == "allow"
+    assert result["criteria"]["protocol"] == 6
+    assert [h for h, _ in fake.calls] == ["fw1.lan"]
+
+    result = await hass.services.async_call(
+        DOMAIN, "test_security_policy", {"source": "10.2.4.86", "destination": "9.9.9.9"},
+        blocking=True, return_response=True,
+    )
+    assert result["matched"] is False and result["rule"] is None and "note" in result
+
+    with pytest.raises(HomeAssistantError, match="bogus"):
+        await hass.services.async_call(
+            DOMAIN, "test_security_policy",
+            {"source": "10.2.4.86", "destination": "1.1.1.1", "from_zone": "bogus"},
+            blocking=True, return_response=True,
+        )

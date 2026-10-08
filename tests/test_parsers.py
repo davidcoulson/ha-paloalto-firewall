@@ -1,3 +1,4 @@
+import pytest
 from datetime import date
 
 from custom_components.paloalto_firewall import parsers
@@ -84,3 +85,38 @@ def test_lookup_parsing_and_matching():
     assert find("KITCHEN") == ["10.2.3.45"]
     assert find("ethernet1/3") == ["10.2.4.1"]
     assert len(find("")) == 5
+
+
+def test_policy_match_parsing():
+    rules = parsers.parse_policy_match(parse_response(fakefw.POLICY_MATCH))
+    assert rules[0]["name"] == "IoT-to-Internet" and rules[0]["index"] == 12
+    assert rules[0]["action"] == "allow"
+    assert rules[0]["from"] == ["iot"] and rules[0]["to"] == ["untrust"]
+    assert rules[0]["application_service"] == ["ssl/tcp/any/443"]
+    old = parsers.parse_policy_match(parse_response(fakefw.POLICY_MATCH_OLD))
+    assert old == [{"name": "IoT-to-Internet", "index": 12}]
+    assert parsers.parse_policy_match(parse_response(fakefw.POLICY_NO_MATCH)) == []
+
+
+def test_policy_cmd_builder():
+    from custom_components.paloalto_firewall.services import POLICY_SCHEMA, build_policy_match_cmd
+
+    data = POLICY_SCHEMA({
+        "source": "10.2.4.86", "destination": "1.1.1.1", "protocol": "TCP",
+        "destination_port": "443", "from_zone": "iot", "to_zone": "untrust",
+        "application": "ssl", "source_user": "corp\\bob & co",
+    })
+    assert build_policy_match_cmd(data) == (
+        "<test><security-policy-match><from>iot</from><to>untrust</to>"
+        "<source>10.2.4.86</source><destination>1.1.1.1</destination>"
+        "<destination-port>443</destination-port><protocol>6</protocol>"
+        "<application>ssl</application><source-user>corp\\bob &amp; co</source-user>"
+        "</security-policy-match></test>"
+    )
+    import voluptuous as vol
+    for bad in ({"source": "nope", "destination": "1.1.1.1"},
+                {"source": "10.0.0.1", "destination": "1.1.1.1", "protocol": "bogus"},
+                {"source": "10.0.0.1", "destination": "1.1.1.1", "destination_port": 70000}):
+        with pytest.raises(vol.Invalid):
+            POLICY_SCHEMA(bad)
+    assert POLICY_SCHEMA({"source": "10.0.0.1", "destination": "::1", "protocol": 17})["protocol"] == 17

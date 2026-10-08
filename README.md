@@ -108,6 +108,42 @@ matches:
 
 If one table can't be read (for example, no DHCP server is configured), the other is still returned and the problem is listed under `errors`.
 
+## Test security policy
+
+`paloalto_firewall.test_security_policy` asks the active firewall which security rule would match a given flow. It's the same as the CLI `test security-policy-match`:
+
+```yaml
+action: paloalto_firewall.test_security_policy
+data:
+  source: 10.2.4.86
+  destination: 1.1.1.1
+  protocol: tcp          # tcp | udp | icmp | protocol number (default tcp)
+  destination_port: 443
+  from_zone: iot         # optional, but recommended
+  to_zone: untrust       # optional
+  application: ssl       # optional App-ID
+  # source_user, category, show_all are also available
+response_variable: result
+```
+
+Response:
+
+```yaml
+firewall: fw1
+matched: true
+rule: IoT-to-Internet
+action: allow
+rules:
+  - name: IoT-to-Internet
+    index: 12
+    action: allow
+    from: [iot]
+    to: [untrust]
+    ...
+```
+
+If no rule matches, `matched` is false and the default rules apply. Errors from the firewall, such as an unknown zone or application name, are raised as action errors.
+
 ## Icons
 
 The Palo Alto Networks icon and logo ship in `custom_components/paloalto_firewall/brand/` (Home Assistant 2026.3+ serves them locally). They're used for the integration tile, the PAN-OS and Apps & threats update entities, and the Apps & threats version sensor.

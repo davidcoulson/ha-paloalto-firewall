@@ -17,3 +17,58 @@ lookup:
       selector:
         config_entry:
           integration: paloalto_firewall
+
+test_security_policy:
+  fields:
+    source:
+      required: true
+      example: 10.2.4.86
+      selector:
+        text:
+    destination:
+      required: true
+      example: 1.1.1.1
+      selector:
+        text:
+    protocol:
+      default: tcp
+      selector:
+        select:
+          custom_value: true
+          options:
+            - tcp
+            - udp
+            - icmp
+    destination_port:
+      example: 443
+      selector:
+        number:
+          min: 0
+          max: 65535
+          mode: box
+    from_zone:
+      example: trust
+      selector:
+        text:
+    to_zone:
+      example: untrust
+      selector:
+        text:
+    application:
+      example: ssl
+      selector:
+        text:
+    source_user:
+      selector:
+        text:
+    category:
+      selector:
+        text:
+    show_all:
+      default: false
+      selector:
+        boolean:
+    config_entry_id:
+      selector:
+        config_entry:
+          integration: paloalto_firewall

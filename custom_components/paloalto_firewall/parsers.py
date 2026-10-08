@@ -578,3 +578,41 @@ def host_matches(host: dict[str, Any], query: str) -> bool:
         q in str(host.get(field) or "").lower()
         for field in ("ip", "mac", "hostname", "interface")
     )
+
+
+# --------------------------------------------------------------------------
+# test security-policy-match
+# --------------------------------------------------------------------------
+
+_RULE_TEXT_RE = re.compile(r"^(?P<name>.+?);\s*index:\s*(?P<index>\d+)")
+
+
+def _rule_value(el: ET.Element) -> Any:
+    members = [m.text.strip() for m in el.findall("member") if m.text and m.text.strip()]
+    if members:
+        return members
+    if len(el):
+        return None
+    return el.text.strip() if el.text and el.text.strip() else None
+
+
+def parse_policy_match(result: ET.Element) -> list[dict[str, Any]]:
+    """Parse 'test security-policy-match' output, first match first.
+
+    PAN-OS 9+ returns <entry name="rule"> with index/action/... children;
+    older releases return the text "rule; index: N".
+    """
+    rules = []
+    for entry in result.findall("rules/entry"):
+        if entry.get("name"):
+            rule: dict[str, Any] = {"name": entry.get("name")}
+            for child in entry:
+                value = _rule_value(child)
+                if value is not None:
+                    rule[child.tag.replace("-", "_")] = value
+            if "index" in rule:
+                rule["index"] = _int(rule["index"])
+            rules.append(rule)
+        elif entry.text and (match := _RULE_TEXT_RE.match(entry.text.strip())):
+            rules.append({"name": match["name"].strip(), "index": int(match["index"])})
+    return rules

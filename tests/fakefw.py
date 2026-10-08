@@ -85,6 +85,15 @@ DHCP = OK.format("""<interface name="ethernet1/2.30"><allocated>3</allocated><to
 <entry name="10.2.3.120"><ip>10.2.3.120</ip><mac>aa:bb:cc:33:44:55</mac><hostname>iphone</hostname><state>expired</state><duration>86400</duration><leasetime>Wed Oct  7 09:00:00 2026</leasetime></entry>
 </interface>""")
 
+POLICY_MATCH = OK.format("""<rules><entry name="IoT-to-Internet"><index>12</index><from><member>iot</member></from><source><member>any</member></source>
+<source-region>none</source-region><to><member>untrust</member></to><destination><member>any</member></destination>
+<destination-region>none</destination-region><category><member>any</member></category>
+<application_service><member>ssl/tcp/any/443</member></application_service><action>allow</action><icmp-unreachable>no</icmp-unreachable>
+<terminal>yes</terminal></entry></rules>""")
+
+POLICY_MATCH_OLD = OK.format("<rules><entry>IoT-to-Internet; index: 12</entry></rules>")
+POLICY_NO_MATCH = OK.format("<rules/>")
+
 
 class FakePair:
     """State for two firewalls; tests mutate it to simulate failover/outage."""
@@ -108,6 +117,12 @@ class FakePair:
         if self.bad_password:
             raise PanOSAuthError("Invalid credentials")
         peer = self.peer(host)
+        if cmd.startswith("<test><security-policy-match>"):
+            if "<from>bogus</from>" in cmd:
+                return parse_response(
+                    '<response status="error"><msg><line>from bogus is invalid</line></msg></response>'
+                )
+            return parse_response(POLICY_NO_MATCH if "9.9.9.9" in cmd else POLICY_MATCH)
         table = {
             const.CMD_SYSTEM_INFO: system_info(unit["hostname"], unit["serial"]),
             const.CMD_HA_STATE: ha_state(
