@@ -106,4 +106,55 @@ async def collect(client: PanOSClient) -> dict[str, Any]:
         "<destination-port>443</destination-port><protocol>6</protocol></security-policy-match></test>"
     )
     out["sec_test_vsys"] = await _run(client, sec, vsys_name)
+    out.update(await _ipv6_wan(client, iface_xml))
+    return out
+
+
+def _ifaces_from(iface_xml: str) -> dict[str, Any]:
+    from .parsers import parse_interfaces
+
+    try:
+        return parse_interfaces(ET.fromstring(iface_xml))
+    except ET.ParseError:
+        return {}
+
+
+async def _ipv6_wan(client: PanOSClient, iface_xml: str) -> dict[str, Any]:
+    """WAN/IPv6 troubleshooting: NAT rules per vsys, v6 sessions, drops, pings."""
+    out: dict[str, Any] = {}
+    ifaces = _ifaces_from(iface_xml)
+    vsys_names = sorted({i["vsys"] for i in ifaces.values() if i.get("vsys")}) or ["vsys1"]
+    for v in vsys_names:
+        out[f"nat_running_{v}"] = await _run(
+            client, "<show><running><nat-policy></nat-policy></running></show>", v
+        )
+    for dst in ("2606:4700:4700::1111", "1.1.1.1"):
+        out[f"sessions_to_{dst}"] = await _run(
+            client,
+            f"<show><session><all><filter><destination>{dst}</destination></filter></all></session></show>",
+        )
+    out["drop_counters"] = await _run(
+        client,
+        "<show><counter><global><filter><severity>drop</severity><delta>no</delta></filter></global></counter></show>",
+    )
+    # Uplink details and pings sourced from each WAN-side interface address.
+    wan = [n for n, i in ifaces.items() if (i.get("zone") or "").lower() == "internet"]
+    for name in wan + [n for n, i in ifaces.items() if n.startswith(("ae11.", "ae12."))]:
+        out[f"iface_{name}"] = await _run(client, f"<show><interface>{name}</interface></show>")
+    for name in wan:
+        out[f"neighbors_{name}"] = await _run(
+            client, f"<show><neighbor><interface>{name}</interface></neighbor></show>"
+        )
+    for name, iface in ifaces.items():
+        if name not in wan and not name.startswith(("ae11.", "ae12.")):
+            continue
+        for cidr in iface["ips"]:
+            addr = cidr.split("/")[0]
+            if ":" not in addr or addr.startswith("fe80"):
+                continue
+            out[f"ping_from_{name}_{addr}"] = await _run(
+                client,
+                f"<ping><source>{addr}</source><count>3</count>"
+                "<host>2606:4700:4700::1111</host></ping>",
+            )
     return out
