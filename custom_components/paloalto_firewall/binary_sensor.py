@@ -17,7 +17,7 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .coordinator import PanOSConfigEntry
 from .entity import PanOSNetworkEntity, PanOSPairEntity, PanOSUnitEntity, PanOSUpdatesEntity
-from .network import lr_device_info
+from .network import lr_device_info, pm_key_suffix
 
 Data = dict[str, Any]
 
@@ -167,6 +167,8 @@ def network_binary_sensors(entry: PanOSConfigEntry) -> list[BinarySensorEntity]:
     entities: list[BinarySensorEntity] = [PanOSPendingChangesSensor(entry)]
     for name in network.selected_interfaces(data):
         entities.append(PanOSInterfaceLinkSensor(entry, name))
+    for name in data.get("prefix_pools", {}):
+        entities.append(PanOSPrefixMismatchSensor(entry, name))
     for key, group in data["path_groups"].items():
         entities.append(
             PanOSPathMonitorSensor(entry, key, group, lr_device_info(entry, group["logical_router"]))
@@ -226,8 +228,7 @@ class PanOSPathMonitorSensor(PanOSNetworkEntity, BinarySensorEntity):
     _attr_device_class = BinarySensorDeviceClass.CONNECTIVITY
 
     def __init__(self, entry, key: str, group: dict[str, Any], device) -> None:
-        safe = key.replace("|", "_").replace("/", "_").replace(".", "_").replace(":", "_")
-        super().__init__(entry, f"pm_{safe}", device)
+        super().__init__(entry, f"pm_{pm_key_suffix(key)}", device)
         self._key = key
         self._attr_name = f"Path monitor {group['interface']} via {group['nexthop']}"
 
@@ -256,4 +257,40 @@ class PanOSPathMonitorSensor(PanOSNetworkEntity, BinarySensorEntity):
                 f"{m['destination']}: {m['status']} ({m['interval_count']})" for m in group["monitors"]
             ],
             "firewall": self.data.get("unit"),
+        }
+
+
+class PanOSPrefixMismatchSensor(PanOSNetworkEntity, BinarySensorEntity):
+    """On when NPTv6 rules on this WAN don't fit the current delegated prefix."""
+
+    _attr_device_class = BinarySensorDeviceClass.PROBLEM
+
+    def __init__(self, entry: PanOSConfigEntry, pool: str) -> None:
+        super().__init__(entry, f"pd_{pool}_npt_mismatch")
+        self._pool = pool
+        self._attr_name = f"{pool} NPTv6 prefix mismatch"
+
+    def _info(self) -> dict[str, Any] | None:
+        return self.data.get("prefix_pools", {}).get(self._pool)
+
+    @property
+    def available(self) -> bool:
+        info = self._info()
+        return super().available and info is not None and info["nat_checked"]
+
+    @property
+    def is_on(self) -> bool | None:
+        info = self._info()
+        return bool(info["problems"]) if info else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        info = self._info()
+        if not info:
+            return None
+        return {
+            "delegated_prefix": info["prefix"],
+            "vsys": info["vsys"],
+            "problems": info["problems"],
+            "nptv6_rules_checked": info["nptv6_rules"],
         }

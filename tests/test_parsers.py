@@ -120,3 +120,20 @@ def test_policy_cmd_builder():
         with pytest.raises(vol.Invalid):
             POLICY_SCHEMA(bad)
     assert POLICY_SCHEMA({"source": "10.0.0.1", "destination": "::1", "protocol": 17})["protocol"] == 17
+
+
+def test_nat_text_match_and_running_nat():
+    from xml.etree.ElementTree import fromstring
+    assert parsers.parse_policy_match(parse_response(fakefw.NAT_MATCH)) == [{"name": "IoT-Hide-NAT"}]
+    rules = parsers.parse_running_nat(parse_response(fakefw.running_nat("vsys2")))
+    assert list(rules) == ["NPT", "NPT (#2)"]
+    assert rules["NPT"]["translate_to"].startswith("src: 2001:db8:aaa:f0")
+    assert parsers.nptv6_prefixes(rules["NPT (#2)"]) == {
+        "direction": "inbound", "public": "2001:db8:aaa:f0:0:0:0:0/60", "dynamic": False}
+    # Interface-address dynamic translation to a /128 is flagged.
+    dyn = {"X": {"nat_type": "nptv6", "to_interface": "ethernet1/2",
+                 "translate_to": "src: ethernet1/2 2001:db8:ffff::1(*)/128 (dynamic-ip) (pool idx: 0)"}}
+    problems, _ = parsers.nptv6_mismatches(dyn, {"name": "wan-b", "prefix": "2001:db8:b00::/56", "interface": "ethernet1/2"})
+    assert problems and "/128" in problems[0]
+    pools = parsers.parse_pd_pools(parse_response(fakefw.pd_pools()))
+    assert pools["wan-b"]["prefix"] == "2001:db8:b00::/56" and pools["wan-a"]["state"] == "active"

@@ -197,7 +197,77 @@ def interface_detail(name, ibytes, obytes):
     )
 
 
-NAT_MATCH = OK.format('<rules><entry name="IoT-Hide-NAT"><index>2</index><from><member>IoT</member></from></entry></rules>')
+# PAN-OS returns NAT test matches as bare rule names.
+NAT_MATCH = OK.format("<rules>\n\t<entry>IoT-Hide-NAT</entry>\n</rules>")
+
+
+def pd_pools(wan_b_prefix="2001:db8:b00::/56"):
+    def pool(name, prefix, iface, inherited):
+        assign = "".join(f'<entry name="{n}"><address>{a}</address></entry>' for n, a in inherited)
+        return (f'<entry name="{name}"><prefix>{prefix}</prefix><interface>{iface}</interface>'
+                f"<lease>6 days 23:00:00</lease><preferred-lifetime>604800</preferred-lifetime>"
+                f"<valid-lifetime>604800</valid-lifetime><iaid>1</iaid><duid>x</duid><state>active</state>"
+                f"<inherited-interface/><address-assignment>{assign}</address-assignment></entry>")
+    return OK.format(
+        "<pools>"
+        + pool("wan-a", "2001:db8:a00::/56", "ethernet1/1", [("ae1.20", "2001:db8:a00:20::1")])
+        + pool("wan-b", wan_b_prefix, "ethernet1/2", [])
+        + "</pools>"
+    )
+
+
+def running_nat(vsys):
+    if vsys == "vsys2":  # wan-a: translation points at an old prefix
+        body = """Nat policy configured on vsys2:
+"NPT; index: 1" {
+        nat-type nptv6;
+        from Core;
+        source fd00:9::/60 ;
+        to Internet;
+        to-interface ethernet1/1 ;
+        destination any;
+        translate-to "src: 2001:db8:aaa:f0:0:0:0:0/60 (static-ip) (pool idx: 0)";
+        terminal no;
+}
+
+"NPT; index: 2" {
+        nat-type nptv6;
+        from any;
+        source any;
+        to Internet;
+        to-interface  ;
+        destination 2001:db8:aaa:f0:0:0:0:0/60 ;
+        translate-to "dst: fd00:9:0:0:0:0:0:0/60";
+        terminal no;
+}
+"""
+    elif vsys == "vsys3":  # wan-b: matches its delegated prefix
+        body = """Nat policy configured on vsys3:
+"NPT; index: 1" {
+        nat-type nptv6;
+        from Core;
+        source fd00:9::/60 ;
+        to Internet;
+        to-interface ethernet1/2 ;
+        destination any;
+        translate-to "src: 2001:db8:b00:f0:0:0:0:0/60 (static-ip) (pool idx: 0)";
+        terminal no;
+}
+
+"IoT-Hide-NAT; index: 2" {
+        nat-type ipv4;
+        from [ Core IoT ];
+        source [ 10.9.0.0/16 ];
+        to Internet;
+        to-interface ethernet1/2 ;
+        destination any;
+        translate-to "src: ethernet1/2 203.0.113.10(*) (dynamic-ip-and-port) (pool idx: 3)";
+        terminal no;
+}
+"""
+    else:
+        body = f"Nat policy configured on {vsys}:\n"
+    return OK.format(f"<member>{body}</member>")
 
 
 class FakePair:
@@ -216,6 +286,7 @@ class FakePair:
         self.counter_calls = 0
         self.last_vsys: str | None = None
         self.deny_vsys: str | None = None
+        self.wan_b_prefix = "2001:db8:b00::/56"
 
     def peer(self, host):
         return next(u for h, u in self.units.items() if h != host)
@@ -264,6 +335,8 @@ class FakePair:
             const.CMD_PATH_MONITOR: path_monitor(self.wan_b_up),
             const.CMD_JOBS: JOBS,
             const.CMD_PENDING_CHANGES: OK.format("yes"),
+            const.CMD_PD_POOLS: pd_pools(self.wan_b_prefix),
+            const.CMD_RUNNING_NAT: running_nat(self.last_vsys),
             const.CMD_ARP_ALL: ARP,
             const.CMD_DHCP_LEASES: DHCP,
         }
@@ -280,9 +353,9 @@ class FakePair:
             return "KEY"
 
         async def op(self, cmd, timeout=30, vsys=None):
+            fake.last_vsys = vsys
             if cmd.startswith("<test>"):
                 fake.vsys_calls.append((cmd, vsys))
-                fake.last_vsys = vsys
             return fake.respond(self.host, cmd)
 
         monkeypatch.setattr(PanOSClient, "generate_key", generate_key)

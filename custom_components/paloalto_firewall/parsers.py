@@ -613,8 +613,13 @@ def parse_policy_match(result: ET.Element) -> list[dict[str, Any]]:
             if "index" in rule:
                 rule["index"] = _int(rule["index"])
             rules.append(rule)
-        elif entry.text and (match := _RULE_TEXT_RE.match(entry.text.strip())):
-            rules.append({"name": match["name"].strip(), "index": int(match["index"])})
+        elif entry.text and entry.text.strip():
+            text = entry.text.strip()
+            if match := _RULE_TEXT_RE.match(text):
+                rules.append({"name": match["name"].strip(), "index": int(match["index"])})
+            else:
+                # NAT tests return just the rule name.
+                rules.append({"name": text})
     return rules
 
 
@@ -813,3 +818,147 @@ def parse_jobs(result: ET.Element) -> dict[str, Any]:
 
 def parse_pending_changes(result: ET.Element) -> bool:
     return (result.text or "").strip().lower() == "yes"
+
+
+# --------------------------------------------------------------------------
+# show running nat-policy (text) and DHCPv6 prefix-delegation pools
+# --------------------------------------------------------------------------
+
+_NAT_HEADER_RE = re.compile(r'^"(?P<name>.+?); index: (?P<index>\d+)" \{\s*$')
+_NAT_LINE_RE = re.compile(r"^\s*(?P<key>[a-z0-9-]+)\s+(?P<value>.*?)\s*;\s*$")
+_QUOTED_RE = re.compile(r'"([^"]*)"')
+# An IPv6 prefix (must contain a colon; "(*)" markers are stripped first).
+_PREFIX_RE = re.compile(r"(?<![\w:.])([0-9a-fA-F]*:[0-9a-fA-F:.]*/\d+)")
+
+
+def _nat_value(raw: str) -> Any:
+    raw = raw.strip()
+    if raw.startswith("["):
+        inner = raw.strip("[] ")
+        quoted = _QUOTED_RE.findall(inner)
+        return quoted if quoted else inner.split()
+    if raw.startswith('"'):
+        quoted = _QUOTED_RE.findall(raw)
+        return quoted[0] if len(quoted) == 1 else quoted
+    return raw or None
+
+
+def parse_running_nat(result: ET.Element) -> dict[str, dict[str, Any]]:
+    """'show running nat-policy' (vsys-scoped) -> {rule name: fields}.
+
+    The first occurrence of a name is the configured rule; later ones (the
+    implicit reverse of a bidirectional rule) are keyed "name (#index)".
+    """
+    text = "".join(result.itertext())
+    rules: dict[str, dict[str, Any]] = {}
+    current: dict[str, Any] | None = None
+    for line in text.splitlines():
+        if match := _NAT_HEADER_RE.match(line.strip()):
+            name = match["name"]
+            current = {"name": name, "index": int(match["index"])}
+            # A bidirectional rule is listed twice under one name (forward and
+            # reverse); keep both.
+            key = name if name not in rules else f"{name} (#{match['index']})"
+            rules[key] = current
+            continue
+        if current is None:
+            continue
+        if line.strip() == "}":
+            current = None
+            continue
+        if match := _NAT_LINE_RE.match(line):
+            current[match["key"].replace("-", "_")] = _nat_value(match["value"])
+    return rules
+
+
+def nptv6_prefixes(rule: dict[str, Any]) -> dict[str, Any]:
+    """What an NPTv6 rule maps to the outside world.
+
+    Returns {"direction", "public", "dynamic"}: for source translation the
+    translated prefix; for inbound (destination) translation the matched
+    destination prefix. ``dynamic`` is True for interface-address translation.
+    """
+    translate = rule.get("translate_to")
+    items = translate if isinstance(translate, list) else [translate] if translate else []
+    for item in items:
+        item = item.strip().replace("(*)", "")
+        if item.startswith("src:"):
+            match = _PREFIX_RE.search(item)
+            return {
+                "direction": "outbound",
+                "public": match.group(1) if match else None,
+                "dynamic": "(dynamic-ip)" in item,
+            }
+        if item.startswith("dst:"):
+            dest = rule.get("destination")
+            dest = dest[0] if isinstance(dest, list) and dest else dest
+            match = _PREFIX_RE.search(dest or "")
+            return {"direction": "inbound", "public": match.group(1) if match else None, "dynamic": False}
+    return {"direction": None, "public": None, "dynamic": False}
+
+
+def parse_pd_pools(result: ET.Element) -> dict[str, dict[str, Any]]:
+    """'show dhcp client ipv6 pool-details all' -> {pool name: {...}}."""
+    pools: dict[str, dict[str, Any]] = {}
+    for e in result.findall("pools/entry"):
+        name = e.get("name")
+        if not name:
+            continue
+        pools[name] = {
+            "name": name,
+            "prefix": _text(e, "prefix"),
+            "interface": _text(e, "interface"),
+            "state": _text(e, "state"),
+            "lease": _text(e, "lease"),
+            "preferred_lifetime": _int(_text(e, "preferred-lifetime")),
+            "valid_lifetime": _int(_text(e, "valid-lifetime")),
+            "inherited": {
+                a.get("name"): _text(a, "address")
+                for a in e.findall("address-assignment/entry")
+                if a.get("name")
+            },
+        }
+    return pools
+
+
+def nptv6_mismatches(
+    rules: dict[str, dict[str, Any]], pool: dict[str, Any]
+) -> tuple[list[str], list[str]]:
+    """NPTv6 rules for this pool's WAN that don't fit the delegated prefix.
+
+    A rule belongs to the pool's WAN when its to-interface is the pool's
+    interface, or (for inbound rules without one) it sits in the same vsys.
+    Returns (problems, rules checked).
+    """
+    problems: list[str] = []
+    checked: list[str] = []
+    try:
+        delegated = ipaddress.ip_network(pool["prefix"], strict=False)
+    except (TypeError, ValueError):
+        return [f"{pool['name']}: no delegated prefix"], checked
+    for name, rule in rules.items():
+        if rule.get("nat_type") != "nptv6":
+            continue
+        to_if = rule.get("to_interface")
+        if to_if and to_if != pool["interface"]:
+            continue
+        info = nptv6_prefixes(rule)
+        if info["direction"] is None:
+            continue
+        checked.append(name)
+        if info["dynamic"]:
+            if info["public"] and info["public"].endswith("/128"):
+                problems.append(
+                    f"{name}: dynamic translation uses the interface's /128 address, "
+                    f"not the delegated {pool['prefix']}"
+                )
+            continue
+        try:
+            public = ipaddress.ip_network(info["public"], strict=False)
+        except (TypeError, ValueError):
+            continue
+        if public.version == delegated.version and not public.subnet_of(delegated):
+            problems.append(
+                f"{name}: {info['direction']} uses {public}, outside delegated {delegated}"
+            )
+    return problems, checked

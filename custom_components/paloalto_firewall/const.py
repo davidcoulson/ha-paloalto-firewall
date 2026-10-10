@@ -54,9 +54,12 @@ CMD_PATH_MONITOR = (
 )
 CMD_JOBS = "<show><jobs><all></all></jobs></show>"
 CMD_PENDING_CHANGES = "<check><pending-changes></pending-changes></check>"
+CMD_PD_POOLS = "<show><dhcp><client><ipv6><pool-details>all</pool-details></ipv6></client></dhcp></show>"
+CMD_RUNNING_NAT = "<show><running><nat-policy></nat-policy></running></show>"
 
 CONF_INTERFACES = "interfaces"
 EVENT_EGRESS_CHANGE = f"{DOMAIN}_egress_change"
+EVENT_PREFIX_CHANGE = f"{DOMAIN}_prefix_change"
 # Well-known anycast addresses used to find each logical router's internet path.
 PROBE_IPV4 = "1.1.1.1"
 PROBE_IPV6 = "2606:4700:4700::1111"

@@ -402,10 +402,13 @@ async def test_route_lookup_and_inferred_policy_tests(hass: HomeAssistant, fake)
     r = await call("test_nat_policy", {"source": "10.9.20.50", "destination": "1.1.1.1", "destination_port": 443})
     assert [h["egress_interface"] for h in r["hops"]] == ["ae9.101", "ethernet1/2"]
     assert "<to-interface>ethernet1/2</to-interface>" in fake.vsys_calls[1][0]
-    assert r["translations"] == [
-        {"hop": 1, "vsys": "vsys1", "rule": "IoT-Hide-NAT"},
-        {"hop": 2, "vsys": "vsys3", "rule": "IoT-Hide-NAT"},
+    assert [(t["hop"], t["vsys"], t["rule"]) for t in r["translations"]] == [
+        (1, "vsys1", "IoT-Hide-NAT"), (2, "vsys3", "IoT-Hide-NAT"),
     ]
+    # Hop 2's rule exists in vsys3's running NAT, so its translation is reported.
+    assert r["translations"][1]["translate_to"].startswith("src: ethernet1/2 203.0.113.10")
+    assert r["hops"][1]["translation"]["nat_type"] == "ipv4"
+    assert r["translations"][0]["translate_to"] is None  # not in vsys1's running NAT
 
 
 async def test_standalone_network_entities(hass: HomeAssistant, fake) -> None:
@@ -443,3 +446,48 @@ async def test_options_interface_selection(hass: HomeAssistant, fake) -> None:
     assert hass.states.get("binary_sensor.edge_ha_pair_ae1_20_link").state == "on"
     from homeassistant.helpers import entity_registry as er
     assert er.async_get(hass).async_get("sensor.edge_ha_pair_ethernet1_1_in") is None
+
+
+async def test_prefix_pools_and_npt_mismatch(hass: HomeAssistant, fake) -> None:
+    entry = await _setup(hass, fake)
+    st = hass.states.get
+    a = st("sensor.edge_ha_pair_wan_a_delegated_prefix")
+    assert a.state == "2001:db8:a00::/56"
+    assert a.attributes["interface"] == "ethernet1/1" and a.attributes["vsys"] == "vsys2"
+    assert a.attributes["inherited"] == {"ae1.20": "2001:db8:a00:20::1"}
+    assert st("sensor.edge_ha_pair_wan_b_delegated_prefix").state == "2001:db8:b00::/56"
+
+    bad = st("binary_sensor.edge_ha_pair_wan_a_nptv6_prefix_mismatch")
+    assert bad.state == "on"
+    assert bad.attributes["problems"] == [
+        "NPT: outbound uses 2001:db8:aaa:f0::/60, outside delegated 2001:db8:a00::/56",
+        "NPT (#2): inbound uses 2001:db8:aaa:f0::/60, outside delegated 2001:db8:a00::/56",
+    ]
+    assert st("binary_sensor.edge_ha_pair_wan_b_nptv6_prefix_mismatch").state == "off"
+
+    # ISP hands out a new prefix: event fires and the mismatch sensor flips on.
+    events = async_capture_events(hass, "paloalto_firewall_prefix_change")
+    fake.wan_b_prefix = "2001:db8:c00::/56"
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=61))
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert [e.data for e in events] == [{
+        "entry_id": entry.entry_id, "pool": "wan-b", "interface": "ethernet1/2",
+        "previous_prefix": "2001:db8:b00::/56", "prefix": "2001:db8:c00::/56",
+    }]
+    assert st("binary_sensor.edge_ha_pair_wan_b_nptv6_prefix_mismatch").state == "on"
+
+
+async def test_stale_path_monitor_entities_removed(hass: HomeAssistant, fake) -> None:
+    from homeassistant.helpers import entity_registry as er
+
+    entry = await _setup(hass, fake)
+    reg = er.async_get(hass)
+    stale = reg.async_get_or_create(
+        "binary_sensor", DOMAIN, f"{entry.entry_id}_pm_core-vr_ae9_100_fd00_99_old__1",
+        config_entry=entry,
+    )
+    keep = "binary_sensor.wan_b_vr_path_monitor_ethernet1_2_via_203_0_113_1"
+    assert await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert reg.async_get(stale.entity_id) is None
+    assert reg.async_get(keep) is not None

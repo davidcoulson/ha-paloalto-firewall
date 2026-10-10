@@ -24,9 +24,12 @@ from .const import (
     CMD_INTERFACE_ALL,
     CMD_JOBS,
     CMD_PATH_MONITOR,
+    CMD_PD_POOLS,
     CMD_PENDING_CHANGES,
+    CMD_RUNNING_NAT,
     DOMAIN,
     EVENT_EGRESS_CHANGE,
+    EVENT_PREFIX_CHANGE,
     MANUFACTURER,
     PROBE_IPV4,
     PROBE_IPV6,
@@ -122,6 +125,11 @@ def source_interface(
     return best
 
 
+def pm_key_suffix(key: str) -> str:
+    """Unique-id suffix for a path-monitor group key."""
+    return key.replace("|", "_").replace("/", "_").replace(".", "_").replace(":", "_")
+
+
 def logical_routers(data: dict[str, Any]) -> list[str]:
     names = {i["logical_router"] for i in data["interfaces"].values() if i["logical_router"]}
     names |= {r["logical_router"] for r in data["fib"]}
@@ -145,6 +153,7 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         self.unit_hostname: str | None = None
         self._prev_counters: dict[str, tuple[float, dict[str, Any]]] = {}
         self._prev_egress: dict[tuple[str, int], str | None] = {}
+        self._prev_prefix: dict[str, str | None] = {}
         self._warned: set[str] = set()
 
     async def _optional(self, unit: PanOSUnit, key: str, cmd: str, parser) -> Any:
@@ -208,8 +217,63 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         }
         data["path_groups"] = self._group_path_monitors(interfaces, path_monitors or [])
         data["counters"] = await self._counters(unit, self.selected_interfaces(data))
+        data["prefix_pools"] = await self._prefix_pools(unit, interfaces)
         self._fire_egress_events(data["egress"])
+        self._fire_prefix_events(data["prefix_pools"])
         return data
+
+    async def _prefix_pools(
+        self, unit: PanOSUnit, interfaces: dict[str, dict[str, Any]]
+    ) -> dict[str, dict[str, Any]]:
+        """DHCPv6-PD pools, each checked against its WAN vsys's NPTv6 rules."""
+        pools = await self._optional(unit, "pd_pools", CMD_PD_POOLS, parsers.parse_pd_pools)
+        if not pools:
+            return {}
+        nat_by_vsys: dict[str, dict[str, Any] | None] = {}
+        out: dict[str, dict[str, Any]] = {}
+        for name, pool in pools.items():
+            vsys = interfaces.get(pool["interface"] or "", {}).get("vsys")
+            if vsys not in nat_by_vsys:
+                try:
+                    nat_by_vsys[vsys] = parsers.parse_running_nat(
+                        await unit.client.op(CMD_RUNNING_NAT, vsys=vsys)
+                    )
+                except PanOSAuthError as err:
+                    raise ConfigEntryAuthFailed(str(err)) from err
+                except (PanOSError, ValueError) as err:
+                    _LOGGER.debug("running nat-policy for %s unavailable: %s", vsys, err)
+                    nat_by_vsys[vsys] = None
+            rules = nat_by_vsys[vsys]
+            problems, checked = (
+                parsers.nptv6_mismatches(rules, pool) if rules is not None else ([], [])
+            )
+            out[name] = {
+                **pool,
+                "vsys": vsys,
+                "nat_checked": rules is not None,
+                "nptv6_rules": checked,
+                "problems": problems,
+            }
+        return out
+
+    def _fire_prefix_events(self, pools: dict[str, dict[str, Any]]) -> None:
+        for name, pool in pools.items():
+            prefix = pool.get("prefix")
+            if name in self._prev_prefix and self._prev_prefix[name] != prefix:
+                _LOGGER.warning(
+                    "Delegated prefix for %s changed: %s -> %s", name, self._prev_prefix[name], prefix
+                )
+                self.hass.bus.async_fire(
+                    EVENT_PREFIX_CHANGE,
+                    {
+                        "entry_id": self.config_entry.entry_id,
+                        "pool": name,
+                        "interface": pool.get("interface"),
+                        "previous_prefix": self._prev_prefix[name],
+                        "prefix": prefix,
+                    },
+                )
+            self._prev_prefix[name] = prefix
 
     @staticmethod
     def _group_path_monitors(

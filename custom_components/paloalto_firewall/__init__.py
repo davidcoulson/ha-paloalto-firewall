@@ -35,7 +35,7 @@ from .coordinator import (
     PanOSUpdatesCoordinator,
     UnitConfig,
 )
-from .network import PanOSNetworkCoordinator
+from .network import PanOSNetworkCoordinator, pm_key_suffix
 from .services import async_setup_services
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
@@ -103,7 +103,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: PanOSConfigEntry) -> boo
     # Not fatal: logical-router and interface entities are skipped (until the
     # next reload) if the routing/interface commands can't be read yet.
     await runtime.network.async_refresh()
-    _remove_deselected_interface_entities(hass, entry)
+    _remove_stale_network_entities(hass, entry)
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
@@ -126,8 +126,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: PanOSConfigEntry) -> bo
     return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
 
 
-def _remove_deselected_interface_entities(hass: HomeAssistant, entry: PanOSConfigEntry) -> None:
-    """Drop entities for interfaces no longer selected in the options."""
+def _remove_stale_network_entities(hass: HomeAssistant, entry: PanOSConfigEntry) -> None:
+    """Drop entities for deselected interfaces and vanished path monitors."""
     network = entry.runtime_data.network
     if network.data is None:
         return
@@ -136,8 +136,13 @@ def _remove_deselected_interface_entities(hass: HomeAssistant, entry: PanOSConfi
         for name in network.selected_interfaces(network.data)
     }
     prefix = f"{entry.entry_id}_if_"
+    pm_prefix = f"{entry.entry_id}_pm_"
+    pm_keep = {f"{pm_prefix}{pm_key_suffix(k)}" for k in network.data["path_groups"]}
     registry = er.async_get(hass)
     for ent in er.async_entries_for_config_entry(registry, entry.entry_id):
         uid = ent.unique_id
         if uid.startswith(prefix) and not any(uid.startswith(k) for k in keep):
+            registry.async_remove(ent.entity_id)
+        elif uid.startswith(pm_prefix) and uid not in pm_keep:
+            # Path monitor whose next hop no longer exists (e.g. renumbered).
             registry.async_remove(ent.entity_id)

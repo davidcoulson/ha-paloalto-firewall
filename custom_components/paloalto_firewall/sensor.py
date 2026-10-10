@@ -461,6 +461,8 @@ def network_sensors(entry: PanOSConfigEntry) -> list[SensorEntity]:
             entities.append(PanOSInterfaceRateSensor(entry, name, safe, direction))
         if data["interfaces"][name].get("speed"):
             entities.append(PanOSInterfaceSpeedSensor(entry, name, safe))
+    for name in data.get("prefix_pools", {}):
+        entities.append(PanOSDelegatedPrefixSensor(entry, name))
     for lr in data["egress"]:
         device = lr_device_info(entry, lr)
         entities.append(PanOSEgressSensor(entry, lr, "ipv4", device))
@@ -639,3 +641,42 @@ class PanOSRouteCountSensor(PanOSNetworkEntity, SensorEntity):
     def extra_state_attributes(self) -> dict[str, Any] | None:
         info = self.data.get("egress", {}).get(self._lr)
         return {"ipv4": info["routes_ipv4"], "ipv6": info["routes_ipv6"]} if info else None
+
+
+class PanOSDelegatedPrefixSensor(PanOSNetworkEntity, SensorEntity):
+    """IPv6 prefix delegated by the ISP (DHCPv6-PD pool)."""
+
+    _attr_icon = "mdi:ip-network"
+
+    def __init__(self, entry: PanOSConfigEntry, pool: str) -> None:
+        super().__init__(entry, f"pd_{pool}_prefix")
+        self._pool = pool
+        self._attr_name = f"{pool} delegated prefix"
+
+    def _info(self) -> dict[str, Any] | None:
+        return self.data.get("prefix_pools", {}).get(self._pool)
+
+    @property
+    def available(self) -> bool:
+        return super().available and self._info() is not None
+
+    @property
+    def native_value(self) -> str | None:
+        info = self._info()
+        return info["prefix"] if info else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        info = self._info()
+        if not info:
+            return None
+        return {
+            "interface": info["interface"],
+            "vsys": info["vsys"],
+            "state": info["state"],
+            "lease": info["lease"],
+            "preferred_lifetime": info["preferred_lifetime"],
+            "valid_lifetime": info["valid_lifetime"],
+            "inherited": info["inherited"],
+            "firewall": self.data.get("unit"),
+        }

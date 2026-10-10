@@ -21,6 +21,7 @@ from .const import (
     CMD_DHCP_LEASES,
     CMD_FIB,
     CMD_INTERFACE_ALL,
+    CMD_RUNNING_NAT,
     DOMAIN,
     LOOKUP_TIMEOUT,
     SERVICE_LOOKUP,
@@ -261,6 +262,27 @@ def _compact_rule(rule: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+async def _nat_details(
+    unit: PanOSUnit, vsys: str | None, rule: str, cache: dict[str | None, dict[str, Any]]
+) -> dict[str, Any] | None:
+    """The matched NAT rule as running on the firewall (what it translates to)."""
+    if vsys not in cache:
+        try:
+            cache[vsys] = parsers.parse_running_nat(
+                await unit.client.op(CMD_RUNNING_NAT, timeout=LOOKUP_TIMEOUT, vsys=vsys)
+            )
+        except (PanOSError, ValueError):
+            cache[vsys] = {}
+    details = cache[vsys].get(rule)
+    if not details:
+        return None
+    return {
+        k: details.get(k)
+        for k in ("nat_type", "translate_to", "source", "destination", "to_interface", "index")
+        if details.get(k) is not None
+    }
+
+
 async def _run_policy_test(call: ServiceCall, kind: str) -> ServiceResponse:
     """Run a policy test at every hop the flow takes, or one explicit hop."""
     entry = _get_entry(call.hass, call.data.get(ATTR_CONFIG_ENTRY_ID))
@@ -292,6 +314,7 @@ async def _run_policy_test(call: ServiceCall, kind: str) -> ServiceResponse:
                 plan = trace or [{}]
 
             hops = []
+            running_nat: dict[str | None, dict[str, Any]] = {}
             for i, hop in enumerate(plan, 1):
                 data = {**base, "vsys": hop.get("vsys"), "from_zone": hop.get("from_zone"),
                         "to_zone": hop.get("to_zone")}
@@ -309,6 +332,10 @@ async def _run_policy_test(call: ServiceCall, kind: str) -> ServiceResponse:
                 }
                 if kind == "security":
                     entry_out["action"] = first.get("action")
+                elif rules:
+                    entry_out["translation"] = await _nat_details(
+                        unit, data.get("vsys"), first["name"], running_nat
+                    )
                 entry_out["rules"] = [_compact_rule(r) for r in rules]
                 hops.append(entry_out)
                 if hop.get("dropped"):
@@ -350,7 +377,14 @@ async def _run_policy_test(call: ServiceCall, kind: str) -> ServiceResponse:
                     )
         else:
             translations = [
-                {"hop": h["hop"], "vsys": h.get("vsys"), "rule": h["rule"]} for h in hops if h["matched"]
+                {
+                    "hop": h["hop"],
+                    "vsys": h.get("vsys"),
+                    "rule": h["rule"],
+                    "translate_to": (h.get("translation") or {}).get("translate_to"),
+                }
+                for h in hops
+                if h["matched"]
             ]
             response["translations"] = translations
             if not translations:

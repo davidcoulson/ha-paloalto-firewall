@@ -107,6 +107,29 @@ actions:
 - Interface **link**, **link speed**, and **in/out throughput** for the interfaces chosen in *Configure* (by default, the interfaces used by path monitors and internet routes)
 - **Uncommitted changes**, **Running jobs**, and **Last commit** (from the firewall's job history; unknown once it ages out)
 
+### IPv6 delegated prefixes and NPTv6
+
+For each DHCPv6 prefix-delegation pool (e.g. one per ISP), on the pair device:
+
+| Entity | Notes |
+|---|---|
+| *pool* delegated prefix | the prefix the ISP currently delegates; interface, vsys, lease, lifetimes and inherited interface addresses as attributes |
+| *pool* NPTv6 prefix mismatch | **on** when an NPTv6 rule in that WAN's vsys translates outside the delegated prefix, or translates to a single /128 interface address (interface-address Dynamic IP with no inherited prefix). `problems` lists the offending rules |
+
+`paloalto_firewall_prefix_change` fires with `pool`, `interface`, `previous_prefix` and `prefix` when an ISP hands out a new prefix, so you can get notified before IPv6 breaks:
+
+```yaml
+triggers:
+  - trigger: event
+    event_type: paloalto_firewall_prefix_change
+actions:
+  - action: notify.mobile_app_phone
+    data:
+      message: "{{ trigger.event.data.pool }} prefix changed: {{ trigger.event.data.previous_prefix }} → {{ trigger.event.data.prefix }}. Update NPTv6 rules."
+```
+
+Path-monitor entities whose next hop no longer exists (for example after renumbering) are removed automatically when the integration loads.
+
 ## Route lookup
 
 `paloalto_firewall.route_lookup` returns the route, egress interface, next hop, zone and vsys a destination uses. Searches one `logical_router`, the logical router of a `source` IP's interface, or all of them:
@@ -202,7 +225,7 @@ hops:
     rules: [...]
 ```
 
-If you set any of `vsys`, `from_zone` or `to_zone`, that **single hop** is tested, and anything you left out is filled in from the matching traced hop. NAT tests also pass each hop's egress interface as `to-interface`, and list the NAT rules hit under `translations`.
+If you set any of `vsys`, `from_zone` or `to_zone`, that **single hop** is tested, and anything you left out is filled in from the matching traced hop. NAT tests also pass each hop's egress interface as `to-interface`, and list the NAT rules hit under `translations`, with what each rule translates to (from the vsys's running NAT policy).
 
 ## Icons
 
