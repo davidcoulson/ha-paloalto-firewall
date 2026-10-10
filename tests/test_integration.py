@@ -1007,40 +1007,6 @@ async def test_unique_ids_migrate_and_do_not_collide(hass: HomeAssistant, fake) 
     )
 
 
-async def test_gp_client_install(hass: HomeAssistant, fake, monkeypatch) -> None:
-    from homeassistant.exceptions import HomeAssistantError
-
-    from custom_components.paloalto_firewall import jobs
-
-    monkeypatch.setattr(jobs, "POLL_SECONDS", 0)
-    await _setup(hass, fake)
-    entity = "update.fw1_globalprotect_client"
-    assert hass.states.get(entity).attributes["supported_features"] & 1  # INSTALL
-
-    # A failed download is reported and leaves the entity ready to retry.
-    fake.job_fail = {"<request><global-protect-client><software><download>"}
-    with pytest.raises(HomeAssistantError, match="Image not found"):
-        await hass.services.async_call("update", "install", {"entity_id": entity}, blocking=True)
-    state = hass.states.get(entity)
-    assert state.attributes["in_progress"] is False
-    assert state.attributes["installed_version"] == "6.3.3-c1046"
-
-    fake.job_fail = set()
-    fake.calls.clear()
-    await hass.services.async_call("update", "install", {"entity_id": entity}, blocking=True)
-    await hass.async_block_till_done()
-    sent = [c for h, c in fake.calls if h == "fw1.lan" and ("<download>" in c or "<activate>" in c)]
-    assert [("<download>" in c, "<activate>" in c, "6.3.3-c1199" in c) for c in sent] == [
-        (True, False, True),
-        (False, True, True),
-    ]
-    state = hass.states.get(entity)
-    assert state.state == "off"
-    assert state.attributes["installed_version"] == "6.3.3-c1199"
-    # Only the firewall whose entity was installed changes.
-    assert hass.states.get("update.fw2_globalprotect_client").state == "on"
-
-
 async def test_backup_config(hass: HomeAssistant, fake, freezer, tmp_path) -> None:
     hass.config.config_dir = str(tmp_path)
     await _setup(hass, fake)

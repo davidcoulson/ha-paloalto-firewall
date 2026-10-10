@@ -48,16 +48,7 @@ CMD_PATH_MONITOR = (
     "</static-route-path-monitor></advanced-routing></show>"
 )
 CMD_JOBS = "<show><jobs><all></all></jobs></show>"
-CMD_JOB = "<show><jobs><id>{}</id></jobs></show>"
 CMD_RUNNING_CONFIG = "<show><config><running></running></config></show>"
-CMD_GP_CLIENT_DOWNLOAD = (
-    "<request><global-protect-client><software><download><version>{}</version>"
-    "</download></software></global-protect-client></request>"
-)
-CMD_GP_CLIENT_ACTIVATE = (
-    "<request><global-protect-client><software><activate><version>{}</version>"
-    "</activate></software></global-protect-client></request>"
-)
 CMD_PENDING_CHANGES = "<check><pending-changes></pending-changes></check>"
 CMD_PD_POOLS = "<show><dhcp><client><ipv6><pool-details>all</pool-details></ipv6></client></dhcp></show>"
 CMD_GP_PREVIOUS = (

@@ -477,8 +477,6 @@ class FakePair:
         self.certs_device = CERTS_DEVICE
         self.licenses = LICENSES
         self.sync = "synchronized"
-        self.jobs: dict[int, tuple[str, str]] = {}  # id -> (host, cmd)
-        self.job_fail: set[str] = set()  # command prefixes whose jobs fail
 
     def peer(self, host):
         return next(u for h, u in self.units.items() if h != host)
@@ -510,30 +508,6 @@ class FakePair:
             return parse_response(bgp_peers(lr, self.dns_bgp_up))
         if cmd.startswith("<show><session><all><filter>"):
             return parse_response(SESSION_COUNT if "<count>yes</count>" in cmd else SESSIONS)
-        if cmd.startswith(
-            (
-                "<request><global-protect-client><software><download>",
-                "<request><global-protect-client><software><activate>",
-            )
-        ):
-            jid = 900 + len(self.jobs)
-            self.jobs[jid] = (host, cmd)
-            return parse_response(
-                OK.format(f"<msg><line>Job enqueued with jobid {jid}</line></msg><job>{jid}</job>")
-            )
-        if cmd.startswith("<show><jobs><id>"):
-            jid = int(cmd.split("<id>")[1].split("<")[0])
-            jhost, jcmd = self.jobs[jid]
-            failed = any(jcmd.startswith(p) for p in self.job_fail)
-            if not failed and "<activate>" in jcmd:
-                self.units[jhost]["gp"] = jcmd.split("<version>")[1].split("<")[0]
-            return parse_response(
-                OK.format(
-                    f"<job><id>{jid}</id><status>FIN</status><progress>100</progress>"
-                    f"<result>{'FAIL' if failed else 'OK'}</result>"
-                    f"<details><line>{'Image not found' if failed else 'done'}</line></details></job>"
-                )
-            )
         if cmd == const.CMD_RUNNING_CONFIG:
             return parse_response(
                 OK.format(

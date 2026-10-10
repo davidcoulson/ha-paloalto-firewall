@@ -1,29 +1,15 @@
-"""Update entities for PAN-OS software, content and the GlobalProtect client.
-
-PAN-OS and content are read-only: upgrading a firewall needs planning (and a
-reboot). The GlobalProtect client package can be installed from Home
-Assistant: it is downloaded to the firewall and activated for the portal,
-which needs no commit or reboot.
-"""
+"""Update entities (read-only) for PAN-OS software and content."""
 
 from __future__ import annotations
 
 from typing import Any
 
-from homeassistant.components.update import (
-    UpdateEntity,
-    UpdateEntityDescription,
-    UpdateEntityFeature,
-)
+from homeassistant.components.update import UpdateEntity, UpdateEntityDescription
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
-from .api import PanOSError
-from .const import CMD_GP_CLIENT_ACTIVATE, CMD_GP_CLIENT_DOWNLOAD
 from .coordinator import PanOSConfigEntry, PanOSUnit
 from .entity import PanOSUpdatesEntity
-from .jobs import run_job
 from .parsers import (
     content_version_key,
     gp_version_key,
@@ -170,68 +156,13 @@ class PanOSGPClientUpdate(_PanOSUpdate):
     """GlobalProtect app package hosted on the portal, newest in the installed train.
 
     The installed version is what the firewall has activated for clients to
-    download (not what any one laptop runs).
+    download (not what any one laptop runs). Read-only like the others: PAN-OS
+    only lets a superuser activate a client package, and the integration's
+    account is deliberately read-only.
     """
 
     _section = "gp_client"
     _installed_key = "gp_client_version"
-    _attr_supported_features = UpdateEntityFeature.INSTALL | UpdateEntityFeature.PROGRESS
-    _attr_in_progress = False
-
-    async def async_install(self, version: str | None, backup: bool, **kwargs: Any) -> None:
-        """Download (if needed) and activate the package on this firewall."""
-        target = version or self.latest_version
-        if not target or target == self.installed_version:
-            return
-        known = next((v for v in self._versions if v["version"] == target), None)
-        if known is None:
-            raise HomeAssistantError(
-                f"{self.unit.config.hostname} doesn't list GlobalProtect {target}; check for updates first"
-            )
-        client = self.unit.client
-        self._set_progress(0)
-        try:
-            if not known["downloaded"]:
-                await run_job(
-                    client,
-                    CMD_GP_CLIENT_DOWNLOAD.format(target),
-                    on_progress=lambda p: self._set_progress(p * 0.8),
-                )
-            self._set_progress(80)
-            await run_job(
-                client,
-                CMD_GP_CLIENT_ACTIVATE.format(target),
-                timeout=300,
-                on_progress=lambda p: self._set_progress(80 + p * 0.2),
-            )
-        except PanOSError as err:
-            reason = str(err)
-            if "superuser" in reason.lower():
-                reason = (
-                    "the firewall only lets a superuser activate GlobalProtect packages. "
-                    "Activate it under Device > GlobalProtect Client, or give the integration's "
-                    "admin a role that allows it"
-                )
-            raise HomeAssistantError(
-                f"Installing GlobalProtect {target} on {self.unit.config.hostname} failed: {reason}"
-            ) from err
-        finally:
-            self._attr_in_progress = False
-            self._attr_update_percentage = None
-            self.async_write_ha_state()
-            # Even after a failure the package may now be downloaded. The
-            # activated version comes from `show system info`; the version
-            # list's downloaded/current flags from the update check.
-            self.hass.async_create_task(self._refresh())
-
-    async def _refresh(self) -> None:
-        await self.unit.coordinator.async_refresh()
-        await self.coordinator.async_refresh()
-
-    def _set_progress(self, percent: float) -> None:
-        self._attr_in_progress = True
-        self._attr_update_percentage = int(percent)
-        self.async_write_ha_state()
 
     def _latest(self) -> dict[str, Any]:
         return latest_gp_client(self._versions, self.installed_version)

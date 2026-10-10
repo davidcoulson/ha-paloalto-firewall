@@ -22,7 +22,7 @@ On the firewall (it syncs to the peer with HA config sync):
 
 1. **Device → Admin Roles → Add** — e.g. `ha-monitor`
    - *Web UI*: disable everything
-   - *XML API*: enable **Operational Requests** only (also covers the config backup and the GlobalProtect client install)
+   - *XML API*: enable **Operational Requests** only (also covers the config backup)
    - *Command Line*: None · *REST API*: disable everything
 2. **Device → Administrators → Add** — role-based, profile `ha-monitor`, a strong password.
 3. Commit.
@@ -79,7 +79,7 @@ actions:
 
 `request system software check`, `request content upgrade check` and `request global-protect-client software check` run every 6 hours per unit (configurable) and in the background at startup. The **PAN-OS** update entity tracks the newest release **in your installed feature train** (e.g. 11.1.x) — moving to a new train is a planning decision, so the newest release overall is shown in the `newest_release_any_train` attribute instead. The **GlobalProtect client** update entity works the same way (e.g. newest 6.3.x vs the package the portal currently hands out), and is only created when a GlobalProtect client package is activated.
 
-The PAN-OS and content entities are read-only. The **GlobalProtect client** entity can be installed from Home Assistant (Settings → Updates, or the `update.install` action): it downloads the package to that firewall if needed and activates it for the portal, with a progress bar. No commit or reboot is involved. Each firewall in a pair has its own entity, so install it on both. GlobalProtect apps then upgrade according to your portal's *Allow User to Upgrade GlobalProtect App* setting.
+Update entities are read-only; nothing is downloaded or installed. PAN-OS only lets a superuser activate a GlobalProtect client package, so activate new client versions under Device → GlobalProtect Client.
 
 To check right away, press a firewall's **Check for updates** button, or call the action from an automation (with a response, it returns installed and newest versions per firewall):
 
@@ -325,7 +325,7 @@ With debug logging enabled for the integration, *Download diagnostics* also incl
 
 ## Commands used
 
-`show system info`, `show high-availability state`, `show session info`, `show system resources`, `show running resource-monitor minute last 1`, `show system environmentals`, `show global-protect-gateway current-user` and `previous-user`, `show sslmgr-store config-ca-certificate` and `config-certificate-info`, `show admins`, `show vpn ipsec-sa`, `request system software check`, `request content upgrade check`, `request global-protect-client software check`, `request license info`. Only when you ask: `show config running` (backup), `request global-protect-client software download` / `activate` and `show jobs id` (GlobalProtect install).
+`show system info`, `show high-availability state`, `show session info`, `show system resources`, `show running resource-monitor minute last 1`, `show system environmentals`, `show global-protect-gateway current-user` and `previous-user`, `show sslmgr-store config-ca-certificate` and `config-certificate-info`, `show admins`, `show vpn ipsec-sa`, `request system software check`, `request content upgrade check`, `request global-protect-client software check`, `request license info`. Only when you run the backup action: `show config running`.
 
 Commands that a model doesn't support (environmentals on VM-series, GlobalProtect when unlicensed) are skipped quietly and their entities stay unknown or aren't created.
 
