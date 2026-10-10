@@ -56,6 +56,22 @@ CMD_PATH_MONITOR = (
 CMD_JOBS = "<show><jobs><all></all></jobs></show>"
 CMD_PENDING_CHANGES = "<check><pending-changes></pending-changes></check>"
 CMD_PD_POOLS = "<show><dhcp><client><ipv6><pool-details>all</pool-details></ipv6></client></dhcp></show>"
+CMD_GP_PREVIOUS = (
+    "<show><global-protect-gateway><previous-user></previous-user>"
+    "</global-protect-gateway></show>"
+)
+CMD_GP_CLIENT_CHECK = (
+    "<request><global-protect-client><software><check></check></software>"
+    "</global-protect-client></request>"
+)
+CMD_CERTS_DEVICE = (
+    "<show><sslmgr-store><config-ca-certificate></config-ca-certificate></sslmgr-store></show>"
+)
+CMD_CERTS_STORE = (
+    "<show><sslmgr-store><config-certificate-info></config-certificate-info></sslmgr-store></show>"
+)
+CMD_SESSION_FILTER = "<show><session><all><filter>{}</filter></all></session></show>"
+CMD_SESSION_ID = "<show><session><id>{}</id></session></show>"
 CMD_RUNNING_NAT = "<show><running><nat-policy></nat-policy></running></show>"
 CMD_BGP_SUMMARY = "<show><advanced-routing><bgp><summary></summary></bgp></advanced-routing></show>"
 CMD_BGP_PEERS_LR = (
@@ -67,11 +83,16 @@ CONF_INTERFACES = "interfaces"
 EVENT_EGRESS_CHANGE = f"{DOMAIN}_egress_change"
 EVENT_PREFIX_CHANGE = f"{DOMAIN}_prefix_change"
 EVENT_BGP_PEER_CHANGE = f"{DOMAIN}_bgp_peer_change"
+EVENT_GP_CONNECT = f"{DOMAIN}_globalprotect_connect"
+EVENT_GP_DISCONNECT = f"{DOMAIN}_globalprotect_disconnect"
+CERT_WARN_DAYS = 30
 # Well-known anycast addresses used to find each logical router's internet path.
 PROBE_IPV4 = "1.1.1.1"
 PROBE_IPV6 = "2606:4700:4700::1111"
 
+SERVICE_CHECK_UPDATES = "check_for_updates"
 SERVICE_LOOKUP = "lookup"
+SERVICE_SESSION_LOOKUP = "session_lookup"
 SERVICE_ROUTE_LOOKUP = "route_lookup"
 SERVICE_TEST_NAT_POLICY = "test_nat_policy"
 SERVICE_TEST_SECURITY_POLICY = "test_security_policy"

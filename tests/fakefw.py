@@ -15,7 +15,7 @@ OK = '<response status="success"><result>{}</result></response>'
 def system_info(host, serial, sw="11.1.4-h7", app="8900-9150"):
     return OK.format(f"""<system><hostname>{host}</hostname><ip-address>10.0.0.{serial[-1]}</ip-address>
 <uptime>12 days, 3:04:05</uptime><family>400</family><model>PA-440</model><serial>{serial}</serial>
-<sw-version>{sw}</sw-version><global-protect-client-package-version>6.2.4</global-protect-client-package-version>
+<sw-version>{sw}</sw-version><global-protect-client-package-version>6.3.3-c1046</global-protect-client-package-version>
 <app-version>{app}</app-version><av-version>4950-5470</av-version><threat-version>{app}</threat-version>
 <wildfire-version>912345-916000</wildfire-version><url-filtering-version>20261007.20123</url-filtering-version>
 <logdb-version>11.1.2</logdb-version><operational-mode>normal</operational-mode>
@@ -53,7 +53,111 @@ ENV = OK.format("""<thermal><Slot1><entry><slot>1</slot><description>Temperature
 <entry><slot>1</slot><description>Temperature @ Board</description><min>0</min><max>70</max><alarm>False</alarm><DegreesC>41.0</DegreesC></entry></Slot1></thermal>
 <power><Slot1><entry><slot>1</slot><description>Power: 1.0V</description><alarm>False</alarm><Volts>1.0</Volts></entry></Slot1></power>""")
 
-GP = OK.format("<entry><username>alice</username></entry><entry><username>bob</username></entry>")
+GP_HOSTS = {"alice": ("alice-laptop", "198.51.100.7", "10.9.0.2"), "bob": ("bob-mac", "203.0.113.50", "10.9.0.3")}
+
+
+def _gp_entry(user, login=1790861465, logout=None, reason=None):
+    computer, public, virtual = GP_HOSTS.get(user, (f"{user}-pc", "192.0.2.1", "10.9.0.9"))
+    out = (f"<entry><domain/><username>{user}</username><primary-username>{user}</primary-username>"
+           f"<computer>{computer}</computer><client>Apple Mac OS X 26.6.2</client>"
+           f"<app-version>6.3.3-1046</app-version><virtual-ip>{virtual}</virtual-ip>"
+           f"<virtual-ipv6>::</virtual-ipv6><public-ip>{public}</public-ip><public-ipv6>::</public-ipv6>"
+           f"<tunnel-type>IPSec</tunnel-type><source-region>US</source-region>"
+           f"<login-time-utc>{login}</login-time-utc>")
+    if logout:
+        out += f"<logout-time-utc>{logout}</logout-time-utc><reason>{reason}</reason>"
+    return out + "</entry>"
+
+
+def gp_current(online):
+    return OK.format("".join(_gp_entry(u) for u in sorted(online)))
+
+
+GP_PREVIOUS = OK.format(
+    _gp_entry("carol", 1790000000, 1790003600, "user logout")
+    + _gp_entry("alice", 1789000000, 1789003600, "user session expired")
+    + _gp_entry("carol", 1789500000, 1789503600, "user logout")
+)
+
+GP_CLIENT = OK.format("""<sw-updates last-updated-at="2026/10/10 02:41:29"><msg/><versions>
+<entry><version>6.3.3-c1199</version><downloaded>no</downloaded><current>no</current><latest>no</latest><released-on>2026/10/08 10:10:39</released-on><release-notes>https://example.com/gp</release-notes></entry>
+<entry><version>6.3.3-c1046</version><downloaded>yes</downloaded><current>yes</current><latest>no</latest><released-on>2026/06/12 21:00:16</released-on></entry>
+<entry><version>6.3.3</version><downloaded>no</downloaded><current>no</current><latest>no</latest><released-on>2025/04/30</released-on></entry>
+<entry><version>6.4.0</version><downloaded>no</downloaded><current>no</current><latest>no</latest><released-on>2026/09/30</released-on></entry>
+<entry><version>6.2.8-c1084</version><downloaded>no</downloaded><current>no</current><latest>no</latest><released-on>2026/10/08</released-on></entry>
+</versions></sw-updates>""")
+
+
+def _make_pem(cn, days, issuer_cn=None, sans=()):
+    from datetime import datetime, timedelta, timezone
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.x509.oid import NameOID
+
+    key = ec.generate_private_key(ec.SECP256R1())
+    now = datetime.now(timezone.utc)
+    builder = (
+        x509.CertificateBuilder()
+        .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, cn)]))
+        .issuer_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, issuer_cn or cn)]))
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(days=60))
+        .not_valid_after(now + timedelta(days=days))
+    )
+    if sans:
+        builder = builder.add_extension(
+            x509.SubjectAlternativeName([x509.DNSName(n) for n in sans]), critical=False
+        )
+    cert = builder.sign(key, hashes.SHA256())
+    return cert.public_bytes(serialization.Encoding.PEM).decode(), now + timedelta(days=days)
+
+
+def certs_device():
+    leaf, leaf_exp = _make_pem("fw.example.net", 10, "E8", ("fw.example.net", "gp.example.net"))
+    inter, _ = _make_pem("E8", 300, "ISRG Root X1")
+    ca, ca_exp = _make_pem("HomeCA", 1200)
+    text = (
+        "428F87DB2E24DEF29438F3FF550A4B0B4EAADC8E:2B6BE102DAA80ACD7BC32AD4AE51E9AEC9A799A3\n"
+        "    vsys id: 0\n    cert name: fw.example.net\n"
+        f"    subject name hash: 428F\n    public key: {leaf}{inter}\n    private key: exist\n\n"
+        "88EF2F55E94BF3246665458AF69E8177C7B448C9:47E23078E27E36F7DAFF16B4A568B2B228964C34\n"
+        "    vsys id: 0\n    cert name: HomeCA\n"
+        f"    subject name hash: 88EF\n    public key: {ca}\n    private key: exist\n\n"
+    )
+    store = ""
+    for name, exp, status in (
+        ("/CN=fw.example.net", leaf_exp, "V"),
+        ("/CN=HomeCA", ca_exp, "V"),
+        ("/CN=old-self-signed", None, "E"),
+    ):
+        stamp = exp.strftime("%y%m%d%H%M%SZ") if exp else "260811122609Z"
+        store += (
+            "ABCDEF:123456\n    serial number: \n        issuer: /CN=HomeCA\n"
+            f"        db-exp-date: {stamp}(whenever)\n        db-serialno: ABCDEF\n"
+            f"        db-name: {name}\n        db-status: {status}\n\n"
+        )
+    return OK.format(text), OK.format(store)
+
+
+CERTS_DEVICE, CERTS_STORE = certs_device()
+
+SESSIONS = OK.format("""<entry><dst>1.1.1.1</dst><xsource>203.0.113.10</xsource><source>10.2.4.86</source>
+<xdst>1.1.1.1</xdst><xsport>40001</xsport><xdport>443</xdport><sport>51515</sport><dport>443</dport>
+<proto>6</proto><from>Core</from><to>Internet</to><start-time>Sat Oct 10 02:41:19 2026</start-time>
+<nat>True</nat><srcnat>True</srcnat><dstnat>False</dstnat><state>ACTIVE</state><type>FLOW</type>
+<total-byte-count>9000</total-byte-count><idx>691086</idx><vsys>vsys1</vsys><application>ssl</application>
+<security-rule>Allow web</security-rule><ingress>ae1.20</ingress><egress>ethernet1/1</egress></entry>
+<entry><dst>1.1.1.1</dst><xsource>10.2.4.86</xsource><source>10.2.4.86</source><xdst>1.1.1.1</xdst>
+<xsport>51516</xsport><xdport>53</xdport><sport>51516</sport><dport>53</dport><proto>17</proto><from>Core</from>
+<to>Internet</to><nat>False</nat><srcnat>False</srcnat><dstnat>False</dstnat><state>ACTIVE</state>
+<idx>691090</idx><vsys>vsys1</vsys><application>dns-base</application><security-rule>Allow DNS</security-rule>
+<total-byte-count>120</total-byte-count></entry>""")
+SESSION_COUNT = OK.format("<member>2</member>")
+SESSION_DETAIL = OK.format("""<slot>1</slot><c2s><source>10.2.4.86</source><dst>1.1.1.1</dst><dport>443</dport>
+<source-zone>Core</source-zone></c2s><application>ssl</application><rule>Allow web</rule><end-reason>unknown</end-reason>""")
 ADMINS = OK.format("<admins><entry><admin>admin</admin><from>10.0.0.50</from></entry></admins>")
 IPSEC = OK.format("<ntun>2</ntun><entries><entry><name>site-a</name></entry><entry><name>site-b</name></entry></entries>")
 
@@ -311,6 +415,7 @@ class FakePair:
         self.deny_vsys: str | None = None
         self.wan_b_prefix = "2001:db8:b00::/56"
         self.dns_bgp_up = True
+        self.gp_online = {"alice", "bob"}
 
     def peer(self, host):
         return next(u for h, u in self.units.items() if h != host)
@@ -331,6 +436,10 @@ class FakePair:
         if cmd.startswith("<show><advanced-routing><bgp><peer><status><logical-router>"):
             lr = cmd.split("<logical-router>")[1].split("<")[0]
             return parse_response(bgp_peers(lr, self.dns_bgp_up))
+        if cmd.startswith("<show><session><all><filter>"):
+            return parse_response(SESSION_COUNT if "<count>yes</count>" in cmd else SESSIONS)
+        if cmd.startswith("<show><session><id>"):
+            return parse_response(SESSION_DETAIL)
         if cmd.startswith("<test><nat-policy-match>"):
             return parse_response(NAT_MATCH)
         if cmd.startswith("<test><security-policy-match>"):
@@ -351,7 +460,11 @@ class FakePair:
             const.CMD_SYSTEM_RESOURCES: RESOURCES,
             const.CMD_DATAPLANE: DATAPLANE,
             const.CMD_ENVIRONMENTALS: ENV,
-            const.CMD_GP_USERS: GP,
+            const.CMD_GP_USERS: gp_current(self.gp_online),
+            const.CMD_GP_PREVIOUS: GP_PREVIOUS,
+            const.CMD_GP_CLIENT_CHECK: GP_CLIENT,
+            const.CMD_CERTS_DEVICE: CERTS_DEVICE,
+            const.CMD_CERTS_STORE: CERTS_STORE,
             const.CMD_ADMINS: ADMINS,
             const.CMD_IPSEC_SA: IPSEC,
             const.CMD_SOFTWARE_CHECK: SOFTWARE,

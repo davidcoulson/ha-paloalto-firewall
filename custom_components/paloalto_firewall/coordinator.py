@@ -23,6 +23,7 @@ from .devices import get_device
 from .const import (
     CMD_ADMINS,
     CMD_CONTENT_CHECK,
+    CMD_GP_CLIENT_CHECK,
     CMD_DATAPLANE,
     CMD_ENVIRONMENTALS,
     CMD_GP_USERS,
@@ -207,7 +208,7 @@ class PanOSUpdatesCoordinator(_BaseCoordinator):
         super().__init__(hass, entry, client, unit, "updates", interval)
 
     async def _async_update_data(self) -> dict[str, Any]:
-        software, content, licenses = await asyncio.gather(
+        software, content, licenses, gp_client = await asyncio.gather(
             self._optional(
                 "software", CMD_SOFTWARE_CHECK, parsers.parse_software_check, UPDATE_CHECK_TIMEOUT
             ),
@@ -215,13 +216,21 @@ class PanOSUpdatesCoordinator(_BaseCoordinator):
                 "content", CMD_CONTENT_CHECK, parsers.parse_content_check, UPDATE_CHECK_TIMEOUT
             ),
             self._optional("licenses", CMD_LICENSE_INFO, parsers.parse_licenses),
+            self._optional(
+                "gp_client", CMD_GP_CLIENT_CHECK, parsers.parse_software_check, UPDATE_CHECK_TIMEOUT
+            ),
         )
         if software is None and content is None and licenses is None:
             raise UpdateFailed(
                 f"{self.unit.host}: update and licence checks all failed "
                 "(no route to the update server?)"
             )
-        return {"software": software, "content": content, "licenses": licenses}
+        return {
+            "software": software,
+            "content": content,
+            "licenses": licenses,
+            "gp_client": gp_client,
+        }
 
 
 class PanOSPairTracker:

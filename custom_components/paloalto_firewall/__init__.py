@@ -165,6 +165,11 @@ def _remove_stale_network_entities(hass: HomeAssistant, entry: PanOSConfigEntry)
         for peer in info["peers"]
     }
     bgp_lrs_ok = all(info["ok"] for info in network.data.get("bgp", {}).values())
+    cert_prefix = f"{entry.entry_id}_cert_"
+    certs = network.data.get("certificates")
+    cert_keep = {f"{cert_prefix}expiring"} | {
+        f"{cert_prefix}{safe_key(c['name'])}" for c in (certs or {}).get("device", [])
+    }
     registry = er.async_get(hass)
     for ent in er.async_entries_for_config_entry(registry, entry.entry_id):
         uid = ent.unique_id
@@ -175,4 +180,7 @@ def _remove_stale_network_entities(hass: HomeAssistant, entry: PanOSConfigEntry)
             registry.async_remove(ent.entity_id)
         elif uid.startswith(bgp_prefix) and uid not in bgp_keep and bgp_lrs_ok:
             # BGP peer removed from the configuration.
+            registry.async_remove(ent.entity_id)
+        elif uid.startswith(cert_prefix) and certs is not None and uid not in cert_keep:
+            # Certificate deleted or renamed in the firewall config.
             registry.async_remove(ent.entity_id)

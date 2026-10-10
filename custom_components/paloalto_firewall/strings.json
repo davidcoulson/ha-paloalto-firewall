@@ -225,6 +225,78 @@
           "description": "Only needed if more than one firewall or pair is configured."
         }
       }
+    },
+    "session_lookup": {
+      "name": "Session lookup",
+      "description": "List live sessions on the active firewall that match the filters (like 'show session all filter'), or show one session in detail by ID.",
+      "fields": {
+        "source": {
+          "name": "Source IP",
+          "description": "Original (pre-NAT) source address."
+        },
+        "destination": {
+          "name": "Destination IP",
+          "description": "Original (pre-NAT) destination address."
+        },
+        "destination_port": {
+          "name": "Destination port",
+          "description": "Destination port."
+        },
+        "source_port": {
+          "name": "Source port",
+          "description": "Source port."
+        },
+        "protocol": {
+          "name": "Protocol",
+          "description": "tcp, udp, icmp or an IP protocol number."
+        },
+        "application": {
+          "name": "Application",
+          "description": "App-ID name, e.g. ssl or dns-base."
+        },
+        "from_zone": {
+          "name": "From zone",
+          "description": "Source zone."
+        },
+        "to_zone": {
+          "name": "To zone",
+          "description": "Destination zone."
+        },
+        "rule": {
+          "name": "Security rule",
+          "description": "Name of the security rule the session matched."
+        },
+        "source_user": {
+          "name": "Source user",
+          "description": "User-ID user of the source."
+        },
+        "state": {
+          "name": "State",
+          "description": "Session state."
+        },
+        "limit": {
+          "name": "Limit",
+          "description": "Most sessions to return (the total matching is always reported)."
+        },
+        "session_id": {
+          "name": "Session ID",
+          "description": "Show this one session in full detail instead of searching."
+        },
+        "config_entry_id": {
+          "name": "Firewall",
+          "description": "Only needed if more than one firewall or pair is configured."
+        }
+      }
+    },
+    "check_for_updates": {
+      "name": "Check for updates",
+      "description": "Ask each firewall to check for PAN-OS, content and GlobalProtect client updates and refresh licences now. Returns installed and newest versions when called with a response.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Firewall",
+          "description": "Only needed if more than one firewall or pair is configured."
+        }
+      }
     }
   },
   "selector": {

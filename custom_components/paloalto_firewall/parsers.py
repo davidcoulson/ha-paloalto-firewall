@@ -317,7 +317,7 @@ def parse_gp_users(result: ET.Element) -> dict[str, Any]:
         _text(e, "username") or _text(e, "primary-username") or "?"
         for e in result.findall("entry")
     ]
-    return {"count": len(users), "users": users}
+    return {"count": len(users), "users": users, "sessions": parse_gp_sessions(result)}
 
 
 def parse_admins(result: ET.Element) -> dict[str, Any]:
@@ -1027,3 +1027,283 @@ def parse_bgp_peers(result: ET.Element) -> dict[str, dict[str, Any]]:
             "prefixes": prefixes,
         }
     return peers
+
+
+# --------------------------------------------------------------------------
+# Sessions
+# --------------------------------------------------------------------------
+
+_SESSION_FIELDS = {
+    "idx": "id",
+    "vsys": "vsys",
+    "application": "application",
+    "state": "state",
+    "type": "type",
+    "from": "from_zone",
+    "to": "to_zone",
+    "source": "source",
+    "sport": "source_port",
+    "dst": "destination",
+    "dport": "destination_port",
+    "proto": "protocol",
+    "ingress": "ingress",
+    "egress": "egress",
+    "security-rule": "rule",
+    "start-time": "start_time",
+    "total-byte-count": "bytes",
+}
+
+
+def parse_sessions(result: ET.Element) -> list[dict[str, Any]]:
+    """`show session all filter ...` entries, flattened."""
+    sessions = []
+    for e in result.findall("entry"):
+        s: dict[str, Any] = {}
+        for tag, key in _SESSION_FIELDS.items():
+            value = _text(e, tag)
+            if key in ("id", "source_port", "destination_port", "protocol", "bytes"):
+                value = _int(value)
+            s[key] = value
+        if _yes_bool(_text(e, "srcnat")):
+            s["nat_source"] = f"{_text(e, 'xsource')}:{_text(e, 'xsport')}"
+        if _yes_bool(_text(e, "dstnat")):
+            s["nat_destination"] = f"{_text(e, 'xdst')}:{_text(e, 'xdport')}"
+        sessions.append(s)
+    return sessions
+
+
+def parse_session_count(result: ET.Element) -> int | None:
+    return _int(_text(result, "member"))
+
+
+def _yes_bool(value: str | None) -> bool:
+    return (value or "").strip().lower() in ("true", "yes")
+
+
+def xml_to_dict(el: ET.Element) -> Any:
+    """Generic element -> dict/str conversion (for detail views)."""
+    children = list(el)
+    if not children:
+        return (el.text or "").strip() or None
+    out: dict[str, Any] = {}
+    for child in children:
+        key = child.tag.replace("-", "_")
+        value = xml_to_dict(child)
+        if key in out:
+            if not isinstance(out[key], list):
+                out[key] = [out[key]]
+            out[key].append(value)
+        else:
+            out[key] = value
+    return out
+
+
+# --------------------------------------------------------------------------
+# GlobalProtect gateway users (current and previous)
+# --------------------------------------------------------------------------
+
+
+def _epoch_iso(value: str | None) -> str | None:
+    ts = _int(value)
+    if not ts:
+        return None
+    from datetime import timezone
+
+    return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+
+
+def _nonzero_ip(value: str | None) -> str | None:
+    return None if value in (None, "::", "0.0.0.0") else value
+
+
+def parse_gp_sessions(result: ET.Element) -> list[dict[str, Any]]:
+    out = []
+    for e in result.findall("entry"):
+        user = _text(e, "username") or _text(e, "primary-username")
+        if not user:
+            continue
+        out.append(
+            {
+                "username": user,
+                "domain": _text(e, "domain"),
+                "computer": _text(e, "computer"),
+                "client": _text(e, "client"),
+                "app_version": _text(e, "app-version"),
+                "virtual_ip": _nonzero_ip(_text(e, "virtual-ip")),
+                "virtual_ipv6": _nonzero_ip(_text(e, "virtual-ipv6")),
+                "public_ip": _nonzero_ip(_text(e, "public-ip")),
+                "public_ipv6": _nonzero_ip(_text(e, "public-ipv6")),
+                "tunnel_type": _text(e, "tunnel-type"),
+                "source_region": _text(e, "source-region"),
+                "login_time": _epoch_iso(_text(e, "login-time-utc")),
+                "logout_time": _epoch_iso(_text(e, "logout-time-utc")),
+                "logout_reason": _text(e, "reason"),
+            }
+        )
+    return out
+
+
+def latest_gp_by_user(sessions: list[dict[str, Any]], time_key: str) -> dict[str, dict[str, Any]]:
+    """Most recent session per username (by ``time_key``)."""
+    out: dict[str, dict[str, Any]] = {}
+    for s in sessions:
+        prev = out.get(s["username"])
+        if prev is None or (s.get(time_key) or "") > (prev.get(time_key) or ""):
+            out[s["username"]] = s
+    return out
+
+
+# --------------------------------------------------------------------------
+# GlobalProtect client package versions (6.3.3-c1199)
+# --------------------------------------------------------------------------
+
+_GP_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)(?:-c(\d+))?")
+
+
+def gp_version_key(version: str | None) -> tuple[int, int, int, int] | None:
+    if not version:
+        return None
+    match = _GP_RE.match(version.strip())
+    if not match:
+        return None
+    major, minor, maint, build = match.groups()
+    return int(major), int(minor), int(maint), int(build or 0)
+
+
+def latest_gp_client(versions: list[dict[str, Any]], installed: str | None) -> dict[str, Any]:
+    parsed = [(k, v) for v in versions if (k := gp_version_key(v["version"])) is not None]
+    if not parsed:
+        return {"train": None, "overall": None}
+    overall = max(parsed, key=lambda p: p[0])[1]
+    inst = gp_version_key(installed)
+    train = None
+    if inst:
+        same = [p for p in parsed if p[0][:2] == inst[:2]]
+        if same:
+            train = max(same, key=lambda p: p[0])[1]
+    return {"train": train, "overall": overall}
+
+
+# --------------------------------------------------------------------------
+# Certificates
+# --------------------------------------------------------------------------
+
+_ASN1_TIME = re.compile(r"^(\d{12})Z")
+
+
+def _asn1_time(value: str | None) -> datetime | None:
+    """'261020143727Z(Oct 20 ...)' -> aware datetime (UTCTime, YY < 50 => 20YY)."""
+    if not value:
+        return None
+    match = _ASN1_TIME.match(value.strip())
+    if not match:
+        return None
+    from datetime import timezone
+
+    raw = match.group(1)
+    year = int(raw[:2])
+    year += 2000 if year < 50 else 1900
+    return datetime.strptime(f"{year}{raw[2:]}", "%Y%m%d%H%M%S").replace(tzinfo=timezone.utc)
+
+
+def _cn(dn: str | None) -> str | None:
+    if not dn:
+        return None
+    match = re.search(r"/CN=([^/]+)", dn)
+    return match.group(1) if match else dn
+
+
+_STORE_STATUS = {"V": "valid", "E": "expired", "R": "revoked"}
+
+
+def parse_cert_store(result: ET.Element) -> list[dict[str, Any]]:
+    """`show sslmgr-store config-certificate-info`: every cert in the config."""
+    text = "".join(result.itertext())
+    certs = []
+    for block in re.split(r"\n\s*\n", text):
+        fields = dict(re.findall(r"^\s*([\w-]+): ?(.*)$", block, re.M))
+        expires = _asn1_time(fields.get("db-exp-date"))
+        if expires is None:
+            continue
+        subject = fields.get("db-name")
+        certs.append(
+            {
+                "name": _cn(subject),
+                "subject": subject,
+                "issuer": _cn(fields.get("issuer")),
+                "serial": fields.get("db-serialno"),
+                "expires": expires.isoformat(),
+                "status": _STORE_STATUS.get(fields.get("db-status", "").strip(), fields.get("db-status")),
+            }
+        )
+    return certs
+
+
+_PEM_RE = re.compile(r"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----", re.S)
+
+
+def parse_device_certs(result: ET.Element) -> list[dict[str, Any]]:
+    """`show sslmgr-store config-ca-certificate`: certs with private keys, by config name."""
+    from cryptography import x509
+    from cryptography.x509.oid import NameOID
+
+    text = "".join(result.itertext())
+    certs = []
+    for block in re.split(r"\n\s*\n(?=[0-9A-F]{20,}:)", text):
+        name = re.search(r"cert name: (.+)", block)
+        pems = _PEM_RE.findall(block)
+        if not name or not pems:
+            continue
+        entry: dict[str, Any] = {
+            "name": name.group(1).strip(),
+            "vsys": _int((re.search(r"vsys id: (\d+)", block) or [None, None])[1]),
+            "private_key": bool(re.search(r"private key: exist", block)),
+            "chain_length": len(pems),
+        }
+        try:
+            cert = x509.load_pem_x509_certificate(pems[0].encode())
+        except ValueError:
+            continue
+
+        def cn(n: x509.Name) -> str | None:
+            attrs = n.get_attributes_for_oid(NameOID.COMMON_NAME)
+            return str(attrs[0].value) if attrs else n.rfc4514_string() or None
+
+        try:
+            sans = cert.extensions.get_extension_for_class(
+                x509.SubjectAlternativeName
+            ).value.get_values_for_type(x509.DNSName)
+        except x509.ExtensionNotFound:
+            sans = []
+        entry.update(
+            {
+                "subject": cn(cert.subject),
+                "issuer": cn(cert.issuer),
+                "not_before": cert.not_valid_before_utc.isoformat(),
+                "expires": cert.not_valid_after_utc.isoformat(),
+                "self_signed": cert.subject == cert.issuer,
+                "san": sans,
+            }
+        )
+        certs.append(entry)
+    return certs
+
+
+def certs_expiring(
+    store: list[dict[str, Any]], now: datetime, warn_days: int
+) -> dict[str, list[dict[str, Any]]]:
+    """Split config certs into expiring-soon (still valid) and already-expired."""
+    soon, expired = [], []
+    for c in store:
+        expires = datetime.fromisoformat(c["expires"])
+        days = (expires - now).total_seconds() / 86400
+        item = {"name": c["name"], "expires": c["expires"], "days_left": int(days // 1)}
+        if c.get("status") == "revoked":
+            continue
+        if days < 0 or c.get("status") == "expired":
+            expired.append(item)
+        elif days <= warn_days:
+            soon.append(item)
+    soon.sort(key=lambda i: i["expires"])
+    expired.sort(key=lambda i: i["expires"])
+    return {"expiring": soon, "expired": expired}

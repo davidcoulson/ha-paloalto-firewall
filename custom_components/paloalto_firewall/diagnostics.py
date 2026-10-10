@@ -13,7 +13,7 @@ from .coordinator import PanOSConfigEntry
 
 TO_REDACT = {
     CONF_PASSWORD, CONF_USERNAME, "users", "admins", "mgmt_ip", "peer_mgmt_ip",
-    "ips", "nexthop", "monitors",
+    "ips", "nexthop", "monitors", "sessions", "gp_previous", "gp_current", "gp_users",
 }
 
 

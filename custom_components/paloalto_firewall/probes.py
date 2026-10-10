@@ -9,7 +9,6 @@ from a diagnostics download instead of guessing at PAN-OS output formats.
 from __future__ import annotations
 
 import logging
-import re
 import xml.etree.ElementTree as ET
 from typing import Any
 
@@ -17,7 +16,11 @@ from .api import PanOSClient, PanOSError
 from .const import (
     CMD_BGP_PEERS_LR,
     CMD_BGP_SUMMARY,
+    CMD_CERTS_DEVICE,
+    CMD_CERTS_STORE,
     CMD_FIB,
+    CMD_GP_PREVIOUS,
+    CMD_GP_USERS,
     CMD_INTERFACE_ALL,
     CMD_JOBS,
     CMD_PATH_MONITOR,
@@ -37,6 +40,10 @@ STATIC_PROBES: dict[str, str] = {
     "pending_changes": CMD_PENDING_CHANGES,
     "pd_pools": CMD_PD_POOLS,
     "bgp_summary": CMD_BGP_SUMMARY,
+    "gp_current": CMD_GP_USERS,
+    "gp_previous": CMD_GP_PREVIOUS,
+    "certs_device": CMD_CERTS_DEVICE,
+    "certs_store": CMD_CERTS_STORE,
     "drop_counters": (
         "<show><counter><global><filter><severity>drop</severity>"
         "<delta>no</delta></filter></global></counter></show>"
@@ -82,38 +89,4 @@ async def collect(client: PanOSClient) -> dict[str, Any]:
     hw = next((n for n in sorted(ifaces) if n.startswith("ethernet") and "." not in n), None)
     if hw:
         out["interface_detail"] = await _run(client, f"<show><interface>{hw}</interface></show>")
-    out.update(await _new_feature_probes(client))
-    return out
-
-
-async def _new_feature_probes(client: PanOSClient) -> dict[str, Any]:
-    """Temporary: sessions, GlobalProtect and certificate command formats."""
-    out: dict[str, Any] = {}
-    for label, cmd in {
-        "sess_filter_src": "<show><session><all><filter><source>10.2.4.159</source></filter></all></session></show>",
-        "sess_filter_dport": "<show><session><all><filter><destination-port>443</destination-port><count>yes</count></filter></all></session></show>",
-        "sess_filter_app": "<show><session><all><filter><application>dns-base</application></filter></all></session></show>",
-        "gp_previous": "<show><global-protect-gateway><previous-user></previous-user></global-protect-gateway></show>",
-        "gp_gateway": "<show><global-protect-gateway><gateway></gateway></global-protect-gateway></show>",
-        "gp_portal": "<show><global-protect-portal><summary><all></all></summary></global-protect-portal></show>",
-        "gp_client_check": "<request><global-protect-client><software><check></check></software></global-protect-client></request>",
-        "gp_client_info": "<request><global-protect-client><software><info></info></software></global-protect-client></request>",
-        "cert_config_info": "<show><sslmgr-store><config-certificate-info></config-certificate-info></sslmgr-store></show>",
-        "cert_config_ca": "<show><sslmgr-store><config-ca-certificate></config-ca-certificate></sslmgr-store></show>",
-        "cert_device": "<show><device-certificate><status></status></device-certificate></show>",
-        "cert_ssl_decrypt": "<show><system><setting><ssl-decrypt><certificate></certificate></ssl-decrypt></setting></system></show>",
-    }.items():
-        out[label] = await _run(client, cmd)
-    xml = out["sess_filter_src"].get("xml", "") + out["sess_filter_app"].get("xml", "")
-    idx = re.search(r"<idx>(\d+)</idx>", xml)
-    if idx:
-        out["sess_id"] = await _run(client, f"<show><session><id>{idx.group(1)}</id></session></show>")
-    for label, xpath in {
-        "cfg_shared_certs": "/config/shared/certificate",
-        "cfg_vsys_certs": "/config/devices/entry/vsys/entry/certificate",
-    }.items():
-        try:
-            out[label] = {"xpath": xpath, "xml": _dump(await client.config_get(xpath, timeout=60))}
-        except PanOSError as err:
-            out[label] = {"xpath": xpath, "error": str(err)}
     return out

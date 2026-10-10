@@ -149,3 +149,89 @@ route_lookup:
       selector:
         config_entry:
           integration: paloalto_firewall
+
+session_lookup:
+  fields:
+    source:
+      example: 10.2.4.86
+      selector:
+        text:
+    destination:
+      example: 1.1.1.1
+      selector:
+        text:
+    destination_port:
+      example: 443
+      selector:
+        number:
+          min: 0
+          max: 65535
+          mode: box
+    source_port:
+      selector:
+        number:
+          min: 0
+          max: 65535
+          mode: box
+    protocol:
+      selector:
+        select:
+          custom_value: true
+          options:
+            - tcp
+            - udp
+            - icmp
+    application:
+      example: ssl
+      selector:
+        text:
+    from_zone:
+      example: trust
+      selector:
+        text:
+    to_zone:
+      example: untrust
+      selector:
+        text:
+    rule:
+      example: Allow DNS
+      selector:
+        text:
+    source_user:
+      selector:
+        text:
+    state:
+      selector:
+        select:
+          options:
+            - active
+            - discard
+            - closed
+            - closing
+            - initial
+            - opening
+    limit:
+      default: 50
+      selector:
+        number:
+          min: 1
+          max: 500
+          mode: box
+    session_id:
+      example: 691086
+      selector:
+        number:
+          min: 1
+          max: 4294967295
+          mode: box
+    config_entry_id:
+      selector:
+        config_entry:
+          integration: paloalto_firewall
+
+check_for_updates:
+  fields:
+    config_entry_id:
+      selector:
+        config_entry:
+          integration: paloalto_firewall

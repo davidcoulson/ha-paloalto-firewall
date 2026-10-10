@@ -12,8 +12,13 @@ from homeassistant.components.binary_sensor import (
     BinarySensorEntityDescription,
 )
 from homeassistant.const import EntityCategory
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+from homeassistant.util import dt as dt_util
+
+from .const import CERT_WARN_DAYS
+from .parsers import certs_expiring
 
 from .coordinator import PanOSConfigEntry
 from .entity import PanOSNetworkEntity, PanOSPairEntity, PanOSUnitEntity, PanOSUpdatesEntity
@@ -105,6 +110,45 @@ async def async_setup_entry(
         entities.append(PanOSPairHealth(entry, runtime.pair, PAIR_HEALTH))
     entities.extend(network_binary_sensors(entry))
     async_add_entities(entities)
+    _track_gp_users(hass, entry, async_add_entities)
+
+
+GP_UID = "gp_user_"
+GP_NAME = "GlobalProtect "
+
+
+def _track_gp_users(
+    hass: HomeAssistant, entry: PanOSConfigEntry, async_add_entities: AddConfigEntryEntitiesCallback
+) -> None:
+    """One connectivity sensor per GlobalProtect user, added as users appear.
+
+    Users seen before (in the entity registry) are restored even when the
+    firewall's previous-user history no longer lists them.
+    """
+    network = entry.runtime_data.network
+    if network is None:
+        return
+    prefix = f"{entry.entry_id}_{GP_UID}"
+    restored = {
+        ent.original_name[len(GP_NAME):]
+        for ent in er.async_entries_for_config_entry(er.async_get(hass), entry.entry_id)
+        if ent.unique_id.startswith(prefix)
+        and ent.original_name
+        and ent.original_name.startswith(GP_NAME)
+    }
+    network.remember_gp_users(restored)
+    added: set[str] = set()
+
+    @callback
+    def _add_new() -> None:
+        users = set(((network.data or {}).get("gp_users") or {})) | restored
+        new = sorted(users - added)
+        if new:
+            added.update(new)
+            async_add_entities(PanOSGlobalProtectUser(entry, u) for u in new)
+
+    _add_new()
+    entry.async_on_unload(network.async_add_listener(_add_new))
 
 
 class PanOSUnitBinary(PanOSUnitEntity, BinarySensorEntity):
@@ -165,6 +209,8 @@ def network_binary_sensors(entry: PanOSConfigEntry) -> list[BinarySensorEntity]:
         return []
     data = network.data
     entities: list[BinarySensorEntity] = [PanOSPendingChangesSensor(entry)]
+    if data.get("certificates") is not None:
+        entities.append(PanOSCertExpiringSensor(entry))
     for name in network.selected_interfaces(data):
         entities.append(PanOSInterfaceLinkSensor(entry, name))
     for name in data.get("prefix_pools", {}):
@@ -347,3 +393,90 @@ class PanOSBgpPeerSensor(PanOSNetworkEntity, BinarySensorEntity):
             "last_reset": info["last_reset"],
             "firewall": self.data.get("unit"),
         }
+
+
+class PanOSGlobalProtectUser(PanOSNetworkEntity, BinarySensorEntity):
+    """On while the user has a GlobalProtect session on the active gateway."""
+
+    _attr_device_class = BinarySensorDeviceClass.CONNECTIVITY
+    _attr_icon = "mdi:vpn"
+
+    def __init__(self, entry: PanOSConfigEntry, username: str) -> None:
+        super().__init__(entry, f"{GP_UID}{safe_key(username)}")
+        self._user = username
+        self._attr_name = f"{GP_NAME}{username}"
+
+    def _info(self) -> dict[str, Any]:
+        return (self.data.get("gp_users") or {}).get(self._user) or {}
+
+    @property
+    def available(self) -> bool:
+        return super().available and self.data.get("gp_current") is not None
+
+    @property
+    def is_on(self) -> bool:
+        return bool(self._info().get("connected"))
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        info = self._info()
+        sessions = info.get("sessions") or []
+        attrs: dict[str, Any] = {"username": self._user}
+        if sessions:
+            s = sessions[0]
+            attrs.update(
+                {
+                    "computer": s.get("computer"),
+                    "client": s.get("client"),
+                    "app_version": s.get("app_version"),
+                    "virtual_ip": s.get("virtual_ip"),
+                    "public_ip": s.get("public_ip"),
+                    "source_region": s.get("source_region"),
+                    "login_time": s.get("login_time"),
+                    "sessions": len(sessions),
+                }
+            )
+            if len(sessions) > 1:
+                attrs["computers"] = [x.get("computer") for x in sessions]
+        if last := info.get("last_session"):
+            attrs.update(
+                {
+                    "last_logout": last.get("logout_time"),
+                    "last_logout_reason": last.get("logout_reason"),
+                    "last_computer": last.get("computer"),
+                    "last_public_ip": last.get("public_ip"),
+                }
+            )
+        attrs["firewall"] = self.data.get("unit")
+        return attrs
+
+
+class PanOSCertExpiringSensor(PanOSNetworkEntity, BinarySensorEntity):
+    """On when any certificate in the firewall config expires within 30 days."""
+
+    _attr_device_class = BinarySensorDeviceClass.PROBLEM
+    _attr_name = "Certificate expiring"
+    _attr_icon = "mdi:certificate-outline"
+
+    def __init__(self, entry: PanOSConfigEntry) -> None:
+        super().__init__(entry, "cert_expiring")
+
+    def _status(self) -> dict[str, list[dict[str, Any]]] | None:
+        certs = self.data.get("certificates")
+        if certs is None:
+            return None
+        return certs_expiring(certs["store"], dt_util.utcnow(), CERT_WARN_DAYS)
+
+    @property
+    def available(self) -> bool:
+        return super().available and self.data.get("certificates") is not None
+
+    @property
+    def is_on(self) -> bool | None:
+        status = self._status()
+        return None if status is None else bool(status["expiring"])
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        status = self._status() or {"expiring": [], "expired": []}
+        return {**status, "warn_days": CERT_WARN_DAYS}

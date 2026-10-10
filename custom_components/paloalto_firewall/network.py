@@ -22,6 +22,11 @@ from homeassistant.util import dt as dt_util
 from . import parsers
 from .api import PanOSAuthError, PanOSError
 from .const import (
+    CMD_CERTS_DEVICE,
+    CMD_CERTS_STORE,
+    CMD_GP_PREVIOUS,
+    EVENT_GP_CONNECT,
+    EVENT_GP_DISCONNECT,
     CMD_BGP_PEERS_LR,
     CMD_BGP_SUMMARY,
     CMD_FIB,
@@ -168,6 +173,9 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         self.slow_interval = timedelta(seconds=SLOW_INTERVAL)
         self._slow_at: datetime | None = None
         self._slow: dict[str, Any] = {}
+        self._prev_gp: dict[str, bool] = {}
+        self._gp_known: set[str] = set()
+        self._gp_seen: dict[str, dict[str, Any]] = {}
 
     async def _optional(self, unit: PanOSUnit, key: str, cmd: str, parser) -> Any:
         try:
@@ -206,6 +214,10 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             self._optional(unit, "fib", CMD_FIB, parsers.parse_fib),
             self._optional(unit, "path_monitor", CMD_PATH_MONITOR, parsers.parse_path_monitor),
         )
+        # Current GlobalProtect users come from the unit's own status poll
+        # rather than a second identical API call.
+        gp_status = (unit.coordinator.data or {}).get("gp_users")
+        gp_current = None if gp_status is None else gp_status.get("sessions", [])
         if interfaces is None:
             raise UpdateFailed(f"{unit.config.host}: could not read interfaces")
         fib = fib or []
@@ -214,6 +226,7 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             "interfaces": interfaces,
             "fib": fib,
             "path_monitors": path_monitors,
+            "gp_current": gp_current,
         }
 
         data["egress"] = {
@@ -234,18 +247,84 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             await self._refresh_slow(unit, interfaces)
             self._slow_at = now
         data.update({k: v for k, v in self._slow.items() if k != "unit"})
+        data["gp_users"] = self._gp_users(gp_current, data.get("gp_previous"))
+        self._fire_gp_events(data["gp_users"], unit_changed)
         return data
+
+    def _gp_users(
+        self, current: list[dict[str, Any]] | None, previous: list[dict[str, Any]] | None
+    ) -> dict[str, dict[str, Any]] | None:
+        """{username: {connected, sessions, last}} from current and previous users."""
+        if current is None and previous is None:
+            return None
+        now = parsers.latest_gp_by_user(current or [], "login_time")
+        last = parsers.latest_gp_by_user(previous or [], "logout_time")
+        users: dict[str, dict[str, Any]] = {}
+        for name in sorted(set(now) | set(last) | self._gp_known):
+            sessions = [s for s in current or [] if s["username"] == name]
+            if sessions:
+                self._gp_seen[name] = sessions[0]
+            recent = last.get(name)
+            seen = self._gp_seen.get(name)
+            if not sessions and seen and (recent is None or (recent.get("login_time") or "") < (seen.get("login_time") or "")):
+                # Disconnected since we last saw them, before the firewall's
+                # previous-user history caught up.
+                recent = seen
+            users[name] = {
+                "connected": bool(sessions),
+                "sessions": sessions,
+                "last_session": recent,
+            }
+        self._gp_known |= set(users)
+        return users
+
+    def _fire_gp_events(self, users: dict[str, dict[str, Any]] | None, unit_changed: bool) -> None:
+        if users is None or self.data is None or unit_changed:
+            # Nothing to compare against (startup, or GP unreadable/failover).
+            if users is not None:
+                self._prev_gp = {u: info["connected"] for u, info in users.items()}
+            return
+        for name, info in users.items():
+            was = self._prev_gp.get(name)
+            if was is not None and was != info["connected"]:
+                session = (info["sessions"] or [None])[0] or info["last_session"] or {}
+                self.hass.bus.async_fire(
+                    EVENT_GP_CONNECT if info["connected"] else EVENT_GP_DISCONNECT,
+                    {
+                        "entry_id": self.config_entry.entry_id,
+                        "username": name,
+                        "computer": session.get("computer"),
+                        "public_ip": session.get("public_ip"),
+                        "virtual_ip": session.get("virtual_ip"),
+                        "client": session.get("client"),
+                    },
+                )
+            self._prev_gp[name] = info["connected"]
+
+    def remember_gp_users(self, users: set[str]) -> None:
+        """Users known from earlier runs keep reporting (as disconnected)."""
+        self._gp_known |= users
+        if self.data is not None and self.data.get("gp_users") is not None:
+            for name in users - set(self.data["gp_users"]):
+                self.data["gp_users"][name] = {
+                    "connected": False, "sessions": [], "last_session": None
+                }
 
     def request_slow_refresh(self) -> None:
         """Make the next poll re-read the slow tier."""
         self._slow_at = None
 
     async def _refresh_slow(self, unit: PanOSUnit, interfaces: dict[str, Any]) -> None:
-        jobs, pending, prefix_pools, bgp = await asyncio.gather(
-            self._optional(unit, "jobs", CMD_JOBS, parsers.parse_jobs),
-            self._optional(unit, "pending", CMD_PENDING_CHANGES, parsers.parse_pending_changes),
-            self._prefix_pools(unit, interfaces),
-            self._bgp(unit),
+        jobs, pending, prefix_pools, bgp, gp_previous, certs_device, certs_store = (
+            await asyncio.gather(
+                self._optional(unit, "jobs", CMD_JOBS, parsers.parse_jobs),
+                self._optional(unit, "pending", CMD_PENDING_CHANGES, parsers.parse_pending_changes),
+                self._prefix_pools(unit, interfaces),
+                self._bgp(unit),
+                self._optional(unit, "gp_previous", CMD_GP_PREVIOUS, parsers.parse_gp_sessions),
+                self._optional(unit, "certs_device", CMD_CERTS_DEVICE, parsers.parse_device_certs),
+                self._optional(unit, "certs_store", CMD_CERTS_STORE, parsers.parse_cert_store),
+            )
         )
         self._slow = {
             "unit": unit.config.hostname,
@@ -253,6 +332,10 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             "pending_changes": pending,
             "prefix_pools": prefix_pools,
             "bgp": bgp,
+            "gp_previous": gp_previous,
+            "certificates": None
+            if certs_device is None and certs_store is None
+            else {"device": certs_device or [], "store": certs_store or []},
         }
         self._fire_prefix_events(prefix_pools)
         self._fire_bgp_events(bgp)

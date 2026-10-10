@@ -578,3 +578,106 @@ async def test_diagnostics_raw_samples_only_at_debug(hass: HomeAssistant, fake) 
     assert "xml" in raw["interface_all"] and "xml" in raw["fib"]
     assert {"running_nat_vsys2", "running_nat_vsys3", "bgp_peers_core-vr"} <= set(raw)
     assert "error" in raw["drop_counters"]  # not simulated; captured, not raised
+
+
+async def test_globalprotect_presence(hass: HomeAssistant, fake, freezer) -> None:
+    from homeassistant.helpers import entity_registry as er
+
+    entry = await _setup(hass, fake)
+    st = hass.states.get
+    alice = st("binary_sensor.edge_ha_pair_globalprotect_alice")
+    assert alice.state == "on"
+    assert alice.attributes["computer"] == "alice-laptop"
+    assert alice.attributes["public_ip"] == "198.51.100.7"
+    assert alice.attributes["virtual_ip"] == "10.9.0.2"
+    assert alice.attributes["last_logout_reason"] == "user session expired"
+    carol = st("binary_sensor.edge_ha_pair_globalprotect_carol")  # previous users only
+    assert carol.state == "off"
+    assert carol.attributes["last_logout"] == "2026-09-21T15:13:20+00:00"  # newest of two
+
+    events = async_capture_events(hass, "paloalto_firewall_globalprotect_disconnect")
+    connects = async_capture_events(hass, "paloalto_firewall_globalprotect_connect")
+    fake.gp_online = {"alice", "dave"}
+    await _tick(hass, freezer, 61)
+    await _tick(hass, freezer, 61)  # network poll reads the unit poll's latest users
+    assert st("binary_sensor.edge_ha_pair_globalprotect_bob").state == "off"
+    assert [e.data["username"] for e in events] == ["bob"]
+    assert events[0].data["public_ip"] == "203.0.113.50"
+    # A brand-new user gets an entity on the fly (no connect event: nothing to compare).
+    assert st("binary_sensor.edge_ha_pair_globalprotect_dave").state == "on"
+    assert connects == []
+
+    # Users seen before survive a reload even if the firewall forgot them.
+    fake.gp_online = set()
+    assert await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert st("binary_sensor.edge_ha_pair_globalprotect_dave").state == "off"
+    reg = er.async_get(hass)
+    assert reg.async_get("binary_sensor.edge_ha_pair_globalprotect_dave") is not None
+
+
+async def test_certificates(hass: HomeAssistant, fake) -> None:
+    await _setup(hass, fake)
+    st = hass.states.get
+    leaf = st("sensor.edge_ha_pair_certificate_fw_example_net")
+    assert leaf.attributes["device_class"] == "timestamp"
+    assert leaf.attributes["days_left"] in (9, 10)
+    assert leaf.attributes["issuer"] == "E8"
+    assert leaf.attributes["san"] == ["fw.example.net", "gp.example.net"]
+    assert leaf.attributes["chain_length"] == 2
+    assert st("sensor.edge_ha_pair_certificate_homeca").attributes["self_signed"] is True
+
+    warn = st("binary_sensor.edge_ha_pair_certificate_expiring")
+    assert warn.state == "on"
+    assert [c["name"] for c in warn.attributes["expiring"]] == ["fw.example.net"]
+    assert [c["name"] for c in warn.attributes["expired"]] == ["old-self-signed"]
+
+
+async def test_gp_client_update_and_check_action(hass: HomeAssistant, fake) -> None:
+    from custom_components.paloalto_firewall.const import CMD_GP_CLIENT_CHECK
+
+    await _setup(hass, fake)
+    gp = hass.states.get("update.fw1_globalprotect_client")
+    assert gp.state == "on"
+    assert gp.attributes["installed_version"] == "6.3.3-c1046"
+    assert gp.attributes["latest_version"] == "6.3.3-c1199"
+    assert gp.attributes["newest_release_any_train"] == "6.4.0"
+
+    before = sum(1 for _, c in fake.calls if c == CMD_GP_CLIENT_CHECK)
+    resp = await hass.services.async_call(
+        DOMAIN, "check_for_updates", {}, blocking=True, return_response=True
+    )
+    assert sum(1 for _, c in fake.calls if c == CMD_GP_CLIENT_CHECK) == before + 2
+    fw1 = resp["firewalls"]["fw1"]
+    assert fw1["ok"] is True
+    assert fw1["panos_newest_in_train"] == "11.1.6-h3"
+    assert fw1["gp_client_newest_in_train"] == "6.3.3-c1199"
+    # Also callable from an automation without a response.
+    await hass.services.async_call(DOMAIN, "check_for_updates", {}, blocking=True)
+
+
+async def test_session_lookup(hass: HomeAssistant, fake) -> None:
+    from homeassistant.exceptions import ServiceValidationError
+
+    await _setup(hass, fake)
+    resp = await hass.services.async_call(
+        DOMAIN, "session_lookup",
+        {"source": "10.2.4.86", "destination_port": 443, "protocol": "tcp", "limit": 1},
+        blocking=True, return_response=True,
+    )
+    assert resp["firewall"] == "fw1" and resp["total"] == 2
+    assert resp["returned"] == 1 and resp["truncated"] is True
+    s = resp["sessions"][0]
+    assert s["application"] == "ssl" and s["rule"] == "Allow web"
+    assert s["nat_source"] == "203.0.113.10:40001" and "nat_destination" not in s
+    cmd = next(c for _, c in reversed(fake.calls) if c.startswith("<show><session><all>") and "count" not in c)
+    assert "<source>10.2.4.86</source><destination-port>443</destination-port><protocol>6</protocol>" in cmd
+
+    detail = await hass.services.async_call(
+        DOMAIN, "session_lookup", {"session_id": 691086}, blocking=True, return_response=True
+    )
+    assert detail["session"]["c2s"]["source_zone"] == "Core"
+    assert detail["session"]["rule"] == "Allow web"
+
+    with pytest.raises(ServiceValidationError):
+        await hass.services.async_call(DOMAIN, "session_lookup", {}, blocking=True, return_response=True)

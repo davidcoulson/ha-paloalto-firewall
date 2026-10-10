@@ -22,9 +22,13 @@ from .const import (
     CMD_FIB,
     CMD_INTERFACE_ALL,
     CMD_RUNNING_NAT,
+    CMD_SESSION_FILTER,
+    CMD_SESSION_ID,
     DOMAIN,
     LOOKUP_TIMEOUT,
+    SERVICE_CHECK_UPDATES,
     SERVICE_LOOKUP,
+    SERVICE_SESSION_LOOKUP,
     SERVICE_ROUTE_LOOKUP,
     SERVICE_TEST_NAT_POLICY,
     SERVICE_TEST_SECURITY_POLICY,
@@ -448,7 +452,146 @@ async def _async_route_lookup(call: ServiceCall) -> ServiceResponse:
     raise HomeAssistantError(f"No firewall could be reached: {last_error}")
 
 
+SESSION_FILTERS = {
+    # service field -> PAN-OS filter element
+    "source": "source",
+    "destination": "destination",
+    "source_port": "source-port",
+    "destination_port": "destination-port",
+    "protocol": "protocol",
+    "application": "application",
+    "from_zone": "from",
+    "to_zone": "to",
+    "rule": "rule",
+    "source_user": "source-user",
+    "state": "state",
+}
+
+SESSION_SCHEMA = vol.Schema(
+    {
+        vol.Optional(ATTR_CONFIG_ENTRY_ID): cv.string,
+        vol.Optional("session_id"): vol.All(vol.Coerce(int), vol.Range(min=1)),
+        vol.Optional("source"): _ip,
+        vol.Optional("destination"): _ip,
+        vol.Optional("source_port"): cv.port,
+        vol.Optional("destination_port"): cv.port,
+        vol.Optional("protocol"): _protocol,
+        vol.Optional("application"): cv.string,
+        vol.Optional("from_zone"): cv.string,
+        vol.Optional("to_zone"): cv.string,
+        vol.Optional("rule"): cv.string,
+        vol.Optional("source_user"): cv.string,
+        vol.Optional("state"): vol.In(["active", "discard", "closed", "closing", "initial", "opening"]),
+        vol.Optional("limit", default=50): vol.All(vol.Coerce(int), vol.Range(min=1, max=500)),
+    }
+)
+
+
+def build_session_filter(data: dict[str, Any]) -> str:
+    return "".join(
+        f"<{tag}>{escape(str(data[field]))}</{tag}>"
+        for field, tag in SESSION_FILTERS.items()
+        if data.get(field) not in (None, "")
+    )
+
+
+async def _async_session_lookup(call: ServiceCall) -> ServiceResponse:
+    """Live sessions on the active firewall matching the given filters."""
+    entry = _get_entry(call.hass, call.data.get(ATTR_CONFIG_ENTRY_ID))
+    session_id = call.data.get("session_id")
+    filters = build_session_filter(call.data)
+    if not session_id and not filters:
+        raise ServiceValidationError(
+            "Give session_id or at least one filter (source, destination, port, application, zone, rule...)"
+        )
+    limit: int = call.data["limit"]
+    last_error: Exception | None = None
+    for unit in _candidate_units(entry):
+        try:
+            if session_id:
+                detail = await unit.client.op(CMD_SESSION_ID.format(session_id), timeout=LOOKUP_TIMEOUT)
+                return {
+                    "firewall": unit.config.hostname,
+                    "session_id": session_id,
+                    "session": parsers.xml_to_dict(detail),
+                }
+            result, count = await asyncio.gather(
+                unit.client.op(CMD_SESSION_FILTER.format(filters), timeout=LOOKUP_TIMEOUT),
+                unit.client.op(
+                    CMD_SESSION_FILTER.format(filters + "<count>yes</count>"), timeout=LOOKUP_TIMEOUT
+                ),
+            )
+        except PanOSConnectionError as err:
+            last_error = err
+            continue
+        except PanOSError as err:
+            raise HomeAssistantError(f"{unit.config.hostname}: {err}") from err
+        sessions = parsers.parse_sessions(result)
+        total = parsers.parse_session_count(count)
+        if total is None:
+            total = len(sessions)
+        return {
+            "firewall": unit.config.hostname,
+            "total": total,
+            "returned": min(len(sessions), limit),
+            "truncated": total > limit,
+            "sessions": sessions[:limit],
+        }
+    raise HomeAssistantError(f"No firewall could be reached: {last_error}")
+
+
+CHECK_UPDATES_SCHEMA = vol.Schema({vol.Optional(ATTR_CONFIG_ENTRY_ID): cv.string})
+
+
+async def _async_check_updates(call: ServiceCall) -> ServiceResponse:
+    """Run the software, content, GlobalProtect client and licence checks now."""
+    entry = _get_entry(call.hass, call.data.get(ATTR_CONFIG_ENTRY_ID))
+    units = entry.runtime_data.units
+    await asyncio.gather(*(u.updates.async_refresh() for u in units))
+    out: dict[str, Any] = {}
+    for unit in units:
+        data = unit.updates.data or {}
+        system = (unit.coordinator.data or {}).get("system") or {}
+        out[unit.config.hostname] = {
+            "ok": unit.updates.last_update_success,
+            "panos_installed": system.get("sw_version"),
+            "panos_newest_in_train": (
+                parsers.latest_panos(
+                    (data.get("software") or {}).get("versions") or [], system.get("sw_version")
+                )["train"]
+                or {}
+            ).get("version"),
+            "content_installed": system.get("app_version"),
+            "content_latest": (
+                parsers.latest_content((data.get("content") or {}).get("versions") or []) or {}
+            ).get("version"),
+            "gp_client_installed": system.get("gp_client_version"),
+            "gp_client_newest_in_train": (
+                parsers.latest_gp_client(
+                    (data.get("gp_client") or {}).get("versions") or [],
+                    system.get("gp_client_version"),
+                )["train"]
+                or {}
+            ).get("version"),
+        }
+    return {"firewalls": out} if call.return_response else None
+
+
 def async_setup_services(hass: HomeAssistant) -> None:
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_SESSION_LOOKUP,
+        _async_session_lookup,
+        schema=SESSION_SCHEMA,
+        supports_response=SupportsResponse.ONLY,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_CHECK_UPDATES,
+        _async_check_updates,
+        schema=CHECK_UPDATES_SCHEMA,
+        supports_response=SupportsResponse.OPTIONAL,
+    )
     hass.services.async_register(
         DOMAIN,
         SERVICE_LOOKUP,

@@ -10,10 +10,20 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .coordinator import PanOSConfigEntry, PanOSUnit
 from .entity import PanOSUpdatesEntity
-from .parsers import content_version_key, latest_content, latest_panos, panos_version_key
+from .parsers import (
+    content_version_key,
+    gp_version_key,
+    latest_content,
+    latest_gp_client,
+    latest_panos,
+    panos_version_key,
+)
 
 SOFTWARE = UpdateEntityDescription(key="panos_update", name="PAN-OS")
 CONTENT = UpdateEntityDescription(key="content_update", name="Apps & threats content")
+GP_CLIENT = UpdateEntityDescription(
+    key="gp_client_update", name="GlobalProtect client", icon="mdi:vpn"
+)
 
 
 async def async_setup_entry(
@@ -25,6 +35,9 @@ async def async_setup_entry(
     for unit in entry.runtime_data.units:
         entities.append(PanOSSoftwareUpdate(entry, unit, SOFTWARE))
         entities.append(PanOSContentUpdate(entry, unit, CONTENT))
+        system = (unit.coordinator.data or {}).get("system") or {}
+        if system.get("gp_client_version") not in (None, "", "0.0.0"):
+            entities.append(PanOSGPClientUpdate(entry, unit, GP_CLIENT))
     async_add_entities(entities)
 
 
@@ -145,3 +158,50 @@ class PanOSContentUpdate(_PanOSUpdate):
             if v["version"] == latest and v.get("release_notes"):
                 return v["release_notes"]
         return None
+
+
+class PanOSGPClientUpdate(_PanOSUpdate):
+    """GlobalProtect app package hosted on the portal, newest in the installed train.
+
+    The installed version is what the firewall has activated for clients to
+    download (not what any one laptop runs).
+    """
+
+    _section = "gp_client"
+    _installed_key = "gp_client_version"
+
+    def _latest(self) -> dict[str, Any]:
+        return latest_gp_client(self._versions, self.installed_version)
+
+    @property
+    def latest_version(self) -> str | None:
+        train = self._latest()["train"]
+        installed = self.installed_version
+        if train is None:
+            return installed
+        if installed and not self.version_is_newer(train["version"], installed):
+            return installed
+        return train["version"]
+
+    def version_is_newer(self, latest_version: str, installed_version: str) -> bool:
+        latest = gp_version_key(latest_version)
+        installed = gp_version_key(installed_version)
+        if latest is None or installed is None:
+            return latest_version != installed_version
+        return latest > installed
+
+    @property
+    def release_url(self) -> str | None:
+        # Download links on the firewall are signed and expire within days.
+        return "https://docs.paloaltonetworks.com/globalprotect/release-notes"
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        overall = self._latest()["overall"]
+        latest = self.latest_version
+        entry = next((v for v in self._versions if v["version"] == latest), {})
+        return {
+            "newest_release_any_train": overall["version"] if overall else None,
+            "latest_downloaded": entry.get("downloaded"),
+            "released_on": entry.get("released_on"),
+        }

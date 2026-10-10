@@ -15,14 +15,14 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.const import PERCENTAGE, EntityCategory, UnitOfDataRate, UnitOfTemperature
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN
 from .coordinator import PanOSConfigEntry
 from .entity import PanOSNetworkEntity, PanOSPairEntity, PanOSUnitEntity, PanOSUpdatesEntity
-from .network import lr_device_info
+from .network import lr_device_info, safe_key
 from .parsers import HA_STATES
 
 Data = dict[str, Any]
@@ -345,6 +345,28 @@ async def async_setup_entry(
         )
     entities.extend(network_sensors(entry))
     async_add_entities(entities)
+    _track_certificates(entry, async_add_entities)
+
+
+def _track_certificates(
+    entry: PanOSConfigEntry, async_add_entities: AddConfigEntryEntitiesCallback
+) -> None:
+    """An expiry sensor per firewall-owned certificate (those with a private key)."""
+    network = entry.runtime_data.network
+    if network is None:
+        return
+    added: set[str] = set()
+
+    @callback
+    def _add_new() -> None:
+        certs = ((network.data or {}).get("certificates") or {}).get("device") or []
+        new = sorted({c["name"] for c in certs} - added)
+        if new:
+            added.update(new)
+            async_add_entities(PanOSCertificateSensor(entry, n) for n in new)
+
+    _add_new()
+    entry.async_on_unload(network.async_add_listener(_add_new))
 
 
 class PanOSUnitSensor(PanOSUnitEntity, SensorEntity):
@@ -719,4 +741,46 @@ class PanOSBgpEstablishedSensor(PanOSNetworkEntity, SensorEntity):
             "peers": {n: p["state"] for n, p in sorted(info["peers"].items())},
             "router_id": info["router_id"],
             "local_as": info["local_as"],
+        }
+
+
+class PanOSCertificateSensor(PanOSNetworkEntity, SensorEntity):
+    """When a certificate the firewall serves (has the private key for) expires."""
+
+    _attr_device_class = SensorDeviceClass.TIMESTAMP
+    _attr_icon = "mdi:certificate"
+
+    def __init__(self, entry: PanOSConfigEntry, name: str) -> None:
+        super().__init__(entry, f"cert_{safe_key(name)}")
+        self._name = name
+        self._attr_name = f"Certificate {name}"
+
+    def _cert(self) -> dict[str, Any] | None:
+        certs = (self.data.get("certificates") or {}).get("device") or []
+        return next((c for c in certs if c["name"] == self._name), None)
+
+    @property
+    def available(self) -> bool:
+        return super().available and self._cert() is not None
+
+    @property
+    def native_value(self) -> datetime | None:
+        cert = self._cert()
+        return datetime.fromisoformat(cert["expires"]) if cert else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        cert = self._cert() or {}
+        expires = self.native_value
+        return {
+            "subject": cert.get("subject"),
+            "issuer": cert.get("issuer"),
+            "san": cert.get("san"),
+            "not_before": cert.get("not_before"),
+            "days_left": int((expires - dt_util.utcnow()).total_seconds() // 86400)
+            if expires
+            else None,
+            "self_signed": cert.get("self_signed"),
+            "chain_length": cert.get("chain_length"),
+            "vsys": cert.get("vsys"),
         }

@@ -75,7 +75,14 @@ actions:
 
 ### Updates
 
-`request system software check` and `request content upgrade check` run every 6 hours per unit (configurable) and in the background at startup. The **PAN-OS** update entity tracks the newest release **in your installed feature train** (e.g. 11.1.x) — moving to a new train is a planning decision, so the newest release overall is shown in the `newest_release_any_train` attribute instead. Update entities are read-only; nothing is downloaded or installed.
+`request system software check`, `request content upgrade check` and `request global-protect-client software check` run every 6 hours per unit (configurable) and in the background at startup. The **PAN-OS** update entity tracks the newest release **in your installed feature train** (e.g. 11.1.x) — moving to a new train is a planning decision, so the newest release overall is shown in the `newest_release_any_train` attribute instead. The **GlobalProtect client** update entity works the same way (e.g. newest 6.3.x vs the package the portal currently hands out), and is only created when a GlobalProtect client package is activated. Update entities are read-only; nothing is downloaded or installed.
+
+To check right away, press a firewall's **Check for updates** button, or call the action from an automation (with a response, it returns installed and newest versions per firewall):
+
+```yaml
+action: paloalto_firewall.check_for_updates
+response_variable: updates
+```
 
 ## Network: logical routers, WAN egress, interfaces, jobs
 
@@ -136,6 +143,29 @@ actions:
 
 Path-monitor entities whose next hop no longer exists (for example after renumbering) are removed automatically when the integration loads.
 
+### GlobalProtect users
+
+A **GlobalProtect &lt;user&gt;** connectivity sensor per user on the pair device: on while the user has a session on the active gateway, with computer, client OS, app version, virtual and public IP and login time as attributes, plus the last logout time and reason. Users are picked up from the gateway's current and previous-user lists, appear automatically the first time they're seen and are kept across restarts. Events fire when a user connects or disconnects:
+
+```yaml
+triggers:
+  - trigger: event
+    event_type: paloalto_firewall_globalprotect_connect
+actions:
+  - action: notify.mobile_app_phone
+    data:
+      message: "{{ trigger.event.data.username }} connected from {{ trigger.event.data.public_ip }} ({{ trigger.event.data.computer }})"
+```
+
+(`paloalto_firewall_globalprotect_disconnect` has the same fields.) Connection state follows the poll interval, so very short sessions between polls can be missed.
+
+### Certificates
+
+- **Certificate &lt;name&gt;** — a timestamp sensor per certificate the firewall holds a private key for (portal/gateway, management, decryption or CA certs), with subject, issuer, SANs, `days_left` and chain length.
+- **Certificate expiring** — problem sensor, on when any certificate in the configuration (including imported CA and intermediate certs) expires within 30 days; `expiring` and `expired` attributes list them.
+
+Read with `show sslmgr-store config-ca-certificate` and `config-certificate-info`, so the read-only operational API role is enough.
+
 ## Route lookup
 
 `paloalto_firewall.route_lookup` returns the route, egress interface, next hop, zone and vsys a destination uses. Searches one `logical_router`, the logical router of a `source` IP's interface, or all of them:
@@ -180,6 +210,18 @@ matches:
 ```
 
 If one table can't be read (for example, no DHCP server is configured), the other is still returned and the problem is listed under `errors`.
+
+## Session lookup
+
+`paloalto_firewall.session_lookup` lists live sessions on the active firewall, like `show session all filter …`. Filter on any of `source`, `destination`, `source_port`, `destination_port`, `protocol`, `application`, `from_zone`, `to_zone`, `rule`, `source_user` and `state`; `limit` caps how many come back (default 50) while `total` always reports how many matched. Each session includes zones, ingress/egress interfaces, rule, app, bytes and any source/destination NAT. Pass `session_id` instead to get one session in full detail (`show session id`).
+
+```yaml
+action: paloalto_firewall.session_lookup
+data:
+  source: 10.2.4.86
+  destination_port: 443
+response_variable: sessions
+```
 
 ## Test security and NAT policy (hop by hop)
 
@@ -245,7 +287,7 @@ The Palo Alto Networks icon and logo ship in `custom_components/paloalto_firewal
 
 | Every poll (scan interval) | Every 5 minutes | Every 6 hours (configurable) |
 |---|---|---|
-| system/HA/session/resources, interfaces, FIB/egress, path monitors, interface counters | jobs, uncommitted changes, delegated prefixes + NPTv6 check, BGP peers | software/content checks, licences |
+| system/HA/session/resources, GlobalProtect current users, interfaces, FIB/egress, path monitors, interface counters | jobs, uncommitted changes, delegated prefixes + NPTv6 check, BGP peers, GlobalProtect previous users, certificates | software/content/GlobalProtect client checks, licences |
 
 The 5-minute tier also refreshes immediately after a failover, so prefix and BGP events can lag a real change by up to 5 minutes.
 
@@ -255,7 +297,7 @@ With debug logging enabled for the integration, *Download diagnostics* also incl
 
 ## Commands used
 
-`show system info`, `show high-availability state`, `show session info`, `show system resources`, `show running resource-monitor minute last 1`, `show system environmentals`, `show global-protect-gateway current-user`, `show admins`, `show vpn ipsec-sa`, `request system software check`, `request content upgrade check`, `request license info`.
+`show system info`, `show high-availability state`, `show session info`, `show system resources`, `show running resource-monitor minute last 1`, `show system environmentals`, `show global-protect-gateway current-user` and `previous-user`, `show sslmgr-store config-ca-certificate` and `config-certificate-info`, `show admins`, `show vpn ipsec-sa`, `request system software check`, `request content upgrade check`, `request global-protect-client software check`, `request license info`.
 
 Commands that a model doesn't support (environmentals on VM-series, GlobalProtect when unlicensed) are skipped quietly and their entities stay unknown or aren't created.
 
