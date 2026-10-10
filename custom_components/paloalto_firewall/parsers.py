@@ -7,6 +7,7 @@ own. Every parser takes the <result> element of a successful API response.
 from __future__ import annotations
 
 import ipaddress
+import json
 import re
 import xml.etree.ElementTree as ET
 from datetime import date, datetime
@@ -962,3 +963,67 @@ def nptv6_mismatches(
                 f"{name}: {info['direction']} uses {public}, outside delegated {delegated}"
             )
     return problems, checked
+
+
+# --------------------------------------------------------------------------
+# Advanced Routing BGP (JSON wrapped in <json>)
+# --------------------------------------------------------------------------
+
+
+def _json_result(result: ET.Element) -> Any:
+    node = result.find("json")
+    text = node.text if node is not None else result.text
+    if not text or not text.strip():
+        return {}
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as err:
+        raise ValueError(f"Invalid JSON in response: {err}") from err
+
+
+def parse_bgp_summary(result: ET.Element) -> dict[str, dict[str, Any]]:
+    """{logical router: {enabled, router_id, local_as}}."""
+    out = {}
+    for lr, info in (_json_result(result) or {}).items():
+        if isinstance(info, dict):
+            out[lr] = {
+                "enabled": str(info.get("enabled", "")).lower() in ("yes", "true"),
+                "router_id": info.get("router-id"),
+                "local_as": info.get("local-as"),
+            }
+    return out
+
+
+def parse_bgp_peers(result: ET.Element) -> dict[str, dict[str, Any]]:
+    """Per-logical-router 'bgp peer status' -> {peer name: {...}}."""
+    peers: dict[str, dict[str, Any]] = {}
+    for name, p in (_json_result(result) or {}).items():
+        if not isinstance(p, dict) or "state" not in p:
+            continue
+        detail = p.get("detail") or {}
+        prefixes = {
+            afi: {
+                "accepted": info.get("acceptedPrefixCounter"),
+                "sent": info.get("sentPrefixCounter"),
+            }
+            for afi, info in (detail.get("addressFamilyInfo") or {}).items()
+            if isinstance(info, dict)
+        }
+        status_time = p.get("status-time")
+        peers[name] = {
+            "state": p.get("state"),
+            "established": p.get("state") == "Established",
+            "peer_ip": p.get("peer-ip"),
+            "local_ip": p.get("local-ip"),
+            "remote_as": p.get("remote-as"),
+            "local_as": p.get("local-as"),
+            "peer_group": p.get("peer-group-name"),
+            "ipv4": p.get("ipv4"),
+            "ipv6": p.get("ipv6"),
+            "state_seconds": int(status_time) if isinstance(status_time, (int, float)) else None,
+            "uptime": detail.get("bgpTimerUpString"),
+            "hostname": detail.get("hostname"),
+            "last_reset": detail.get("lastResetDueTo"),
+            "prefixes": prefixes,
+        }
+    return peers

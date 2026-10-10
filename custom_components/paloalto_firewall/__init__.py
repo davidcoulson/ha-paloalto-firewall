@@ -35,7 +35,7 @@ from .coordinator import (
     PanOSUpdatesCoordinator,
     UnitConfig,
 )
-from .network import PanOSNetworkCoordinator, pm_key_suffix
+from .network import PanOSNetworkCoordinator, pm_key_suffix, safe_key
 from .services import async_setup_services
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
@@ -127,7 +127,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: PanOSConfigEntry) -> bo
 
 
 def _remove_stale_network_entities(hass: HomeAssistant, entry: PanOSConfigEntry) -> None:
-    """Drop entities for deselected interfaces and vanished path monitors."""
+    """Drop entities for deselected interfaces, vanished path monitors and BGP peers."""
     network = entry.runtime_data.network
     if network.data is None:
         return
@@ -138,6 +138,15 @@ def _remove_stale_network_entities(hass: HomeAssistant, entry: PanOSConfigEntry)
     prefix = f"{entry.entry_id}_if_"
     pm_prefix = f"{entry.entry_id}_pm_"
     pm_keep = {f"{pm_prefix}{pm_key_suffix(k)}" for k in network.data["path_groups"]}
+    bgp_prefix = f"{entry.entry_id}_bgp_"
+    bgp_keep = {f"{bgp_prefix}{lr}_established" for lr in network.data.get("bgp", {})}
+    bgp_keep |= {
+        f"{bgp_prefix}{safe_key(lr)}_{safe_key(peer)}"
+        for lr, info in network.data.get("bgp", {}).items()
+        if info["ok"]
+        for peer in info["peers"]
+    }
+    bgp_lrs_ok = all(info["ok"] for info in network.data.get("bgp", {}).values())
     registry = er.async_get(hass)
     for ent in er.async_entries_for_config_entry(registry, entry.entry_id):
         uid = ent.unique_id
@@ -145,4 +154,7 @@ def _remove_stale_network_entities(hass: HomeAssistant, entry: PanOSConfigEntry)
             registry.async_remove(ent.entity_id)
         elif uid.startswith(pm_prefix) and uid not in pm_keep:
             # Path monitor whose next hop no longer exists (e.g. renumbered).
+            registry.async_remove(ent.entity_id)
+        elif uid.startswith(bgp_prefix) and uid not in bgp_keep and bgp_lrs_ok:
+            # BGP peer removed from the configuration.
             registry.async_remove(ent.entity_id)

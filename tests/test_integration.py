@@ -491,3 +491,38 @@ async def test_stale_path_monitor_entities_removed(hass: HomeAssistant, fake) ->
     await hass.async_block_till_done(wait_background_tasks=True)
     assert reg.async_get(stale.entity_id) is None
     assert reg.async_get(keep) is not None
+
+
+async def test_bgp_peers(hass: HomeAssistant, fake) -> None:
+    from homeassistant.helpers import entity_registry as er
+
+    entry = await _setup(hass, fake)
+    st = hass.states.get
+    est = st("sensor.core_vr_bgp_peers_established")
+    assert est.state == "2" and est.attributes["total"] == 2 and est.attributes["down"] == []
+    assert est.attributes["router_id"] == "172.31.255.1"
+    dns = st("binary_sensor.core_vr_bgp_dns_anycast_0")
+    assert dns.state == "on"
+    assert dns.attributes["peer_ip"] == "10.9.7.10" and dns.attributes["remote_as"] == 65001
+    assert dns.attributes["prefixes"] == {"ipv4Unicast": {"accepted": 1, "sent": 2}}
+    assert st("binary_sensor.wan_a_vr_bgp_core_vr").state == "on"
+    assert st("sensor.wan_b_vr_bgp_peers_established") is None  # BGP disabled there
+
+    events = async_capture_events(hass, "paloalto_firewall_bgp_peer_change")
+    fake.dns_bgp_up = False
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=61))
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert st("binary_sensor.core_vr_bgp_dns_anycast_0").state == "off"
+    assert st("sensor.core_vr_bgp_peers_established").state == "1"
+    assert st("sensor.core_vr_bgp_peers_established").attributes["down"] == ["dns-anycast-0"]
+    assert [(e.data["peer"], e.data["established"], e.data["state"]) for e in events] == [
+        ("dns-anycast-0", False, "Active")
+    ]
+
+    # A peer that disappears from the config is cleaned up on reload.
+    reg = er.async_get(hass)
+    stale = reg.async_get_or_create("binary_sensor", DOMAIN, f"{entry.entry_id}_bgp_core_vr_old_peer", config_entry=entry)
+    assert await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert reg.async_get(stale.entity_id) is None
+    assert reg.async_get("binary_sensor.core_vr_bgp_dns_anycast_0") is not None

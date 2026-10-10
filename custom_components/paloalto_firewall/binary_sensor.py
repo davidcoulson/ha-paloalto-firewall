@@ -17,7 +17,7 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .coordinator import PanOSConfigEntry
 from .entity import PanOSNetworkEntity, PanOSPairEntity, PanOSUnitEntity, PanOSUpdatesEntity
-from .network import lr_device_info, pm_key_suffix
+from .network import lr_device_info, pm_key_suffix, safe_key
 
 Data = dict[str, Any]
 
@@ -169,6 +169,10 @@ def network_binary_sensors(entry: PanOSConfigEntry) -> list[BinarySensorEntity]:
         entities.append(PanOSInterfaceLinkSensor(entry, name))
     for name in data.get("prefix_pools", {}):
         entities.append(PanOSPrefixMismatchSensor(entry, name))
+    for lr, info in data.get("bgp", {}).items():
+        device = lr_device_info(entry, lr)
+        for peer in info["peers"]:
+            entities.append(PanOSBgpPeerSensor(entry, lr, peer, device))
     for key, group in data["path_groups"].items():
         entities.append(
             PanOSPathMonitorSensor(entry, key, group, lr_device_info(entry, group["logical_router"]))
@@ -293,4 +297,53 @@ class PanOSPrefixMismatchSensor(PanOSNetworkEntity, BinarySensorEntity):
             "vsys": info["vsys"],
             "problems": info["problems"],
             "nptv6_rules_checked": info["nptv6_rules"],
+        }
+
+
+class PanOSBgpPeerSensor(PanOSNetworkEntity, BinarySensorEntity):
+    """On while the BGP session is Established."""
+
+    _attr_device_class = BinarySensorDeviceClass.CONNECTIVITY
+
+    def __init__(self, entry: PanOSConfigEntry, lr: str, peer: str, device) -> None:
+        super().__init__(entry, f"bgp_{safe_key(lr)}_{safe_key(peer)}", device)
+        self._lr = lr
+        self._peer = peer
+        self._attr_name = f"BGP {peer}"
+
+    def _info(self) -> dict[str, Any] | None:
+        lr = self.data.get("bgp", {}).get(self._lr)
+        if not lr or not lr["ok"]:
+            return None
+        return lr["peers"].get(self._peer)
+
+    @property
+    def available(self) -> bool:
+        lr = self.data.get("bgp", {}).get(self._lr)
+        return super().available and lr is not None and lr["ok"]
+
+    @property
+    def is_on(self) -> bool:
+        info = self._info()
+        # A configured peer missing from the status output is not up.
+        return bool(info and info["established"])
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        info = self._info()
+        if not info:
+            return {"state": "not present"}
+        return {
+            "state": info["state"],
+            "peer_ip": info["peer_ip"],
+            "local_ip": info["local_ip"],
+            "remote_as": info["remote_as"],
+            "local_as": info["local_as"],
+            "peer_group": info["peer_group"],
+            "hostname": info["hostname"],
+            "uptime": info["uptime"],
+            "seconds_in_state": info["state_seconds"],
+            "prefixes": info["prefixes"],
+            "last_reset": info["last_reset"],
+            "firewall": self.data.get("unit"),
         }

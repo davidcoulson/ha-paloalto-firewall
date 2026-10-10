@@ -463,6 +463,8 @@ def network_sensors(entry: PanOSConfigEntry) -> list[SensorEntity]:
             entities.append(PanOSInterfaceSpeedSensor(entry, name, safe))
     for name in data.get("prefix_pools", {}):
         entities.append(PanOSDelegatedPrefixSensor(entry, name))
+    for lr in data.get("bgp", {}):
+        entities.append(PanOSBgpEstablishedSensor(entry, lr, lr_device_info(entry, lr)))
     for lr in data["egress"]:
         device = lr_device_info(entry, lr)
         entities.append(PanOSEgressSensor(entry, lr, "ipv4", device))
@@ -679,4 +681,42 @@ class PanOSDelegatedPrefixSensor(PanOSNetworkEntity, SensorEntity):
             "valid_lifetime": info["valid_lifetime"],
             "inherited": info["inherited"],
             "firewall": self.data.get("unit"),
+        }
+
+
+class PanOSBgpEstablishedSensor(PanOSNetworkEntity, SensorEntity):
+    """How many of this logical router's BGP peers are Established."""
+
+    _attr_name = "BGP peers established"
+    _attr_icon = "mdi:transit-connection-variant"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+
+    def __init__(self, entry: PanOSConfigEntry, lr: str, device) -> None:
+        super().__init__(entry, f"bgp_{lr}_established", device)
+        self._lr = lr
+
+    def _info(self) -> dict[str, Any] | None:
+        info = self.data.get("bgp", {}).get(self._lr)
+        return info if info and info["ok"] else None
+
+    @property
+    def available(self) -> bool:
+        return super().available and self._info() is not None
+
+    @property
+    def native_value(self) -> int | None:
+        info = self._info()
+        return sum(1 for p in info["peers"].values() if p["established"]) if info else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        info = self._info()
+        if not info:
+            return None
+        return {
+            "total": len(info["peers"]),
+            "down": sorted(n for n, p in info["peers"].items() if not p["established"]),
+            "peers": {n: p["state"] for n, p in sorted(info["peers"].items())},
+            "router_id": info["router_id"],
+            "local_as": info["local_as"],
         }

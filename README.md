@@ -86,6 +86,8 @@ These are read from the **active** firewall and live under the HA pair device (o
 | Internet egress / IPv6 internet egress | the zone this logical router sends internet traffic to (FIB lookup of 1.1.1.1 / 2606:4700:4700::1111); interface, next hop, vsys, matching route and ECMP paths as attributes |
 | Path monitor *interface* via *next hop* | one connectivity sensor per monitored next hop; monitored routes and probe results as attributes |
 | FIB routes | IPv4/IPv6 route counts (diagnostic) |
+| BGP peers established | count of Established peers; `down` lists the rest, `peers` every peer's state (BGP-enabled logical routers only) |
+| BGP *peer* | one connectivity sensor per BGP peer, on while Established; peer/local IP, AS numbers, peer group, uptime, accepted/sent prefixes per address family and last reset reason as attributes |
 
 When an egress changes, `paloalto_firewall_egress_change` fires with `logical_router`, `family`, `previous_interface`/`previous_zone` and `interface`/`zone`/`nexthop`. For example, to be told when internal traffic fails over between WANs:
 
@@ -101,6 +103,8 @@ actions:
     data:
       message: "Internet now via {{ trigger.event.data.zone }} (was {{ trigger.event.data.previous_zone }})"
 ```
+
+`paloalto_firewall_bgp_peer_change` fires when a peer enters or leaves Established, with `logical_router`, `peer`, `peer_ip`, `remote_as`, `state` and `last_reset`. Peers removed from the configuration have their entities cleaned up on the next reload.
 
 **On the pair device:**
 

@@ -270,6 +270,29 @@ def running_nat(vsys):
     return OK.format(f"<member>{body}</member>")
 
 
+BGP_SUMMARY = OK.format('<json>{"core-vr": {"enabled": "yes", "router-id": "172.31.255.1", "local-as": 65000}, '
+                        '"wan-a-vr": {"enabled": "yes", "router-id": "172.31.255.2", "local-as": 65000}, '
+                        '"wan-b-vr": {"enabled": "no", "router-id": "172.31.255.3", "local-as": 65000}}</json>')
+
+
+def bgp_peers(lr, dns_up=True):
+    import json as _json
+
+    def peer(state, peer_ip, remote_as, group, accepted):
+        return {"remote-as": remote_as, "local-as": 65000, "peer-group-name": group, "state": state,
+                "local-ip": "172.31.255.1", "peer-ip": peer_ip, "status-time": 3600.0, "ipv4": True, "ipv6": False,
+                "detail": {"hostname": group, "bgpTimerUpString": "01:00:00", "lastResetDueTo": "Waiting for peer OPEN",
+                           "addressFamilyInfo": {"ipv4Unicast": {"acceptedPrefixCounter": accepted, "sentPrefixCounter": 2}}}}
+    peers = {
+        "core-vr": {
+            "dns-anycast-0": peer("Established" if dns_up else "Active", "10.9.7.10", 65001, "anycast", 1),
+            "wan-a-vr": peer("Established", "172.31.255.2", 65000, "wan", 3),
+        },
+        "wan-a-vr": {"core-vr": peer("Established", "172.31.255.1", 65000, "core", 5)},
+    }.get(lr, {})
+    return OK.format(f"<json>{_json.dumps(peers)}</json>")
+
+
 class FakePair:
     """State for two firewalls; tests mutate it to simulate failover/outage."""
 
@@ -287,6 +310,7 @@ class FakePair:
         self.last_vsys: str | None = None
         self.deny_vsys: str | None = None
         self.wan_b_prefix = "2001:db8:b00::/56"
+        self.dns_bgp_up = True
 
     def peer(self, host):
         return next(u for h, u in self.units.items() if h != host)
@@ -304,6 +328,9 @@ class FakePair:
             name = cmd[len("<show><interface>"):-len("</interface></show>")]
             n = self.counter_calls
             return parse_response(interface_detail(name, n * 7_500_000, n * 750_000))
+        if cmd.startswith("<show><advanced-routing><bgp><peer><status><logical-router>"):
+            lr = cmd.split("<logical-router>")[1].split("<")[0]
+            return parse_response(bgp_peers(lr, self.dns_bgp_up))
         if cmd.startswith("<test><nat-policy-match>"):
             return parse_response(NAT_MATCH)
         if cmd.startswith("<test><security-policy-match>"):
@@ -336,6 +363,7 @@ class FakePair:
             const.CMD_JOBS: JOBS,
             const.CMD_PENDING_CHANGES: OK.format("yes"),
             const.CMD_PD_POOLS: pd_pools(self.wan_b_prefix),
+            const.CMD_BGP_SUMMARY: BGP_SUMMARY,
             const.CMD_RUNNING_NAT: running_nat(self.last_vsys),
             const.CMD_ARP_ALL: ARP,
             const.CMD_DHCP_LEASES: DHCP,

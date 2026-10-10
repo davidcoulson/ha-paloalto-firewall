@@ -20,6 +20,8 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 from . import parsers
 from .api import PanOSAuthError, PanOSError
 from .const import (
+    CMD_BGP_PEERS_LR,
+    CMD_BGP_SUMMARY,
     CMD_FIB,
     CMD_INTERFACE_ALL,
     CMD_JOBS,
@@ -28,6 +30,7 @@ from .const import (
     CMD_PENDING_CHANGES,
     CMD_RUNNING_NAT,
     DOMAIN,
+    EVENT_BGP_PEER_CHANGE,
     EVENT_EGRESS_CHANGE,
     EVENT_PREFIX_CHANGE,
     MANUFACTURER,
@@ -130,6 +133,10 @@ def pm_key_suffix(key: str) -> str:
     return key.replace("|", "_").replace("/", "_").replace(".", "_").replace(":", "_")
 
 
+def safe_key(value: str) -> str:
+    return "".join(c if c.isalnum() else "_" for c in value)
+
+
 def logical_routers(data: dict[str, Any]) -> list[str]:
     names = {i["logical_router"] for i in data["interfaces"].values() if i["logical_router"]}
     names |= {r["logical_router"] for r in data["fib"]}
@@ -154,6 +161,7 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         self._prev_counters: dict[str, tuple[float, dict[str, Any]]] = {}
         self._prev_egress: dict[tuple[str, int], str | None] = {}
         self._prev_prefix: dict[str, str | None] = {}
+        self._prev_bgp: dict[tuple[str, str], bool] = {}
         self._warned: set[str] = set()
 
     async def _optional(self, unit: PanOSUnit, key: str, cmd: str, parser) -> Any:
@@ -218,9 +226,56 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         data["path_groups"] = self._group_path_monitors(interfaces, path_monitors or [])
         data["counters"] = await self._counters(unit, self.selected_interfaces(data))
         data["prefix_pools"] = await self._prefix_pools(unit, interfaces)
+        data["bgp"] = await self._bgp(unit)
         self._fire_egress_events(data["egress"])
         self._fire_prefix_events(data["prefix_pools"])
+        self._fire_bgp_events(data["bgp"])
         return data
+
+    async def _bgp(self, unit: PanOSUnit) -> dict[str, dict[str, Any]]:
+        """{logical router: {router_id, local_as, peers}} for BGP-enabled routers."""
+        summary = await self._optional(unit, "bgp_summary", CMD_BGP_SUMMARY, parsers.parse_bgp_summary)
+        if not summary:
+            return {}
+        enabled = [lr for lr, info in summary.items() if info["enabled"]]
+        peers = await asyncio.gather(
+            *(
+                self._optional(
+                    unit, f"bgp_peers {lr}", CMD_BGP_PEERS_LR.format(lr), parsers.parse_bgp_peers
+                )
+                for lr in enabled
+            )
+        )
+        return {
+            lr: {**summary[lr], "peers": lr_peers if lr_peers is not None else {}, "ok": lr_peers is not None}
+            for lr, lr_peers in zip(enabled, peers)
+        }
+
+    def _fire_bgp_events(self, bgp: dict[str, dict[str, Any]]) -> None:
+        for lr, info in bgp.items():
+            if not info["ok"]:
+                continue
+            for name, peer in info["peers"].items():
+                key = (lr, name)
+                up = peer["established"]
+                if key in self._prev_bgp and self._prev_bgp[key] != up:
+                    _LOGGER.warning(
+                        "BGP peer %s (%s) on %s is now %s", name, peer["peer_ip"], lr, peer["state"]
+                    )
+                    self.hass.bus.async_fire(
+                        EVENT_BGP_PEER_CHANGE,
+                        {
+                            "entry_id": self.config_entry.entry_id,
+                            "logical_router": lr,
+                            "peer": name,
+                            "peer_ip": peer["peer_ip"],
+                            "remote_as": peer["remote_as"],
+                            "established": up,
+                            "state": peer["state"],
+                            "last_reset": peer["last_reset"],
+                        },
+                    )
+                self._prev_bgp[key] = up
 
     async def _prefix_pools(
         self, unit: PanOSUnit, interfaces: dict[str, dict[str, Any]]

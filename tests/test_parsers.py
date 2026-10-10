@@ -123,7 +123,6 @@ def test_policy_cmd_builder():
 
 
 def test_nat_text_match_and_running_nat():
-    from xml.etree.ElementTree import fromstring
     assert parsers.parse_policy_match(parse_response(fakefw.NAT_MATCH)) == [{"name": "IoT-Hide-NAT"}]
     rules = parsers.parse_running_nat(parse_response(fakefw.running_nat("vsys2")))
     assert list(rules) == ["NPT", "NPT (#2)"]
