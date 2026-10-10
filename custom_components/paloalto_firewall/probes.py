@@ -107,6 +107,42 @@ async def collect(client: PanOSClient) -> dict[str, Any]:
     )
     out["sec_test_vsys"] = await _run(client, sec, vsys_name)
     out.update(await _ipv6_wan(client, iface_xml))
+    out.update(await _pd_and_nat(client, iface_xml))
+    return out
+
+
+async def _pd_and_nat(client: PanOSClient, iface_xml: str) -> dict[str, Any]:
+    """DHCPv6-PD state and NAT-test variants against known rules."""
+    out: dict[str, Any] = {}
+    ifaces = _ifaces_from(iface_xml)
+    wan = [n for n, i in ifaces.items() if (i.get("zone") or "").lower() == "internet"
+           and "." not in n and not n.startswith("loopback")]
+    for name in wan:
+        for label, cmd in {
+            "a": f"<show><dhcp><client><ipv6><state><interface>{name}</interface></state></ipv6></client></dhcp></show>",
+            "b": f"<show><dhcp><client><ipv6><state><interface><entry name='{name}'/></interface></state></ipv6></client></dhcp></show>",
+        }.items():
+            out[f"pd_state_{label}_{name}"] = await _run(client, cmd)
+    for label, cmd in {
+        "a": "<show><dhcp><client><ipv6><pool-details>all</pool-details></ipv6></client></dhcp></show>",
+        "b": "<show><dhcp><client><ipv6><pool-details><all/></pool-details></ipv6></client></dhcp></show>",
+    }.items():
+        out[f"pd_pools_{label}"] = await _run(client, cmd)
+
+    v4 = ("<source>10.2.4.159</source><destination>1.1.1.1</destination>"
+          "<destination-port>443</destination-port><protocol>6</protocol>")
+    v6 = ("<source>fd69:deca:fbad:0:1ccc:a68d:1569:5377</source>"
+          "<destination>2606:4700:4700::1111</destination><protocol>58</protocol>")
+    for label, body, vsys in (
+        ("v4_vsys3_toif", f"<from>Core</from><to>Internet</to>{v4}<to-interface>ethernet1/13</to-interface>", "vsys3"),
+        ("v4_vsys3_noif", f"<from>Core</from><to>Internet</to>{v4}", "vsys3"),
+        ("v4_novsys_toif", f"<from>Core</from><to>Internet</to>{v4}<to-interface>ethernet1/13</to-interface>", None),
+        ("v6_vsys3_toif", f"<from>Core</from><to>Internet</to>{v6}<to-interface>ethernet1/13</to-interface>", "vsys3"),
+        ("v6_vsys3_noif", f"<from>Core</from><to>Internet</to>{v6}", "vsys3"),
+    ):
+        out[f"nat_{label}"] = await _run(
+            client, f"<test><nat-policy-match>{body}</nat-policy-match></test>", vsys
+        )
     return out
 
 
