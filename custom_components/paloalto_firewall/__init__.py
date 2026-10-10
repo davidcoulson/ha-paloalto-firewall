@@ -8,7 +8,7 @@ from datetime import timedelta
 from homeassistant.const import CONF_NAME, CONF_PASSWORD, CONF_USERNAME, CONF_VERIFY_SSL
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
-from homeassistant.helpers import config_validation as cv, device_registry as dr
+from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.typing import ConfigType
@@ -24,8 +24,10 @@ from .const import (
     DOMAIN,
     MANUFACTURER,
     PLATFORMS,
+    lr_identifier,
     pair_identifier,
 )
+from .devices import ensure_device
 from .coordinator import (
     PanOSConfigEntry,
     PanOSDeviceCoordinator,
@@ -34,8 +36,9 @@ from .coordinator import (
     PanOSUnit,
     PanOSUpdatesCoordinator,
     UnitConfig,
+    unit_device_fields,
 )
-from .network import PanOSNetworkCoordinator, pm_key_suffix, safe_key
+from .network import LR_DEVICE_FIELDS, PanOSNetworkCoordinator, pm_key_suffix, safe_key
 from .services import async_setup_services
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
@@ -85,14 +88,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: PanOSConfigEntry) -> boo
         raise ConfigEntryNotReady(str(errors[0])) from errors[0]
 
     runtime = PanOSRuntimeData(name=entry.data[CONF_NAME], units=units)
+    pair_device = None
     if len(units) == 2:
-        dr.async_get(hass).async_get_or_create(
-            config_entry_id=entry.entry_id,
-            identifiers={(DOMAIN, pair_identifier(entry.entry_id))},
+        pair_device = ensure_device(
+            hass,
+            entry,
+            (DOMAIN, pair_identifier(entry.entry_id)),
             name=f"{entry.data[CONF_NAME]} HA pair",
             manufacturer=MANUFACTURER,
             model="High-availability pair",
         )
+    unit_devices = [
+        ensure_device(hass, entry, (DOMAIN, u.config.serial), pair_device, **unit_device_fields(u.config))
+        for u in units
+    ]
+    if len(units) == 2:
         runtime.pair = PanOSPairTracker(hass, entry, units)
         runtime.pair.async_start()
     entry.runtime_data = runtime
@@ -104,6 +114,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: PanOSConfigEntry) -> boo
     # next reload) if the routing/interface commands can't be read yet.
     await runtime.network.async_refresh()
     _remove_stale_network_entities(hass, entry)
+    if runtime.network.data:
+        # Logical routers hang off the HA pair (or the lone firewall).
+        lr_parent = pair_device or unit_devices[0]
+        for lr in runtime.network.data["egress"]:
+            ensure_device(
+                hass, entry, (DOMAIN, lr_identifier(entry.entry_id, lr)), lr_parent,
+                name=lr, **LR_DEVICE_FIELDS,
+            )
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 

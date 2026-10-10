@@ -19,6 +19,7 @@ from homeassistant.util import dt as dt_util
 
 from . import parsers
 from .api import PanOSAuthError, PanOSClient, PanOSError
+from .devices import get_device
 from .const import (
     CMD_ADMINS,
     CMD_CONTENT_CHECK,
@@ -36,7 +37,6 @@ from .const import (
     EVENT_FAILOVER,
     MANUFACTURER,
     UPDATE_CHECK_TIMEOUT,
-    pair_identifier,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -72,17 +72,18 @@ class PanOSRuntimeData:
 
 
 def unit_device_info(entry: ConfigEntry, unit: UnitConfig, paired: bool) -> DeviceInfo:
-    info = DeviceInfo(
-        identifiers={(DOMAIN, unit.serial)},
-        name=unit.hostname,
-        manufacturer=MANUFACTURER,
-        model=unit.model,
-        serial_number=unit.serial,
-        configuration_url=f"https://{unit.host}",
-    )
-    if paired:
-        info["via_device"] = (DOMAIN, pair_identifier(entry.entry_id))
-    return info
+    """Entity link to a firewall's device (created with its pair link in setup)."""
+    return DeviceInfo(identifiers={(DOMAIN, unit.serial)})
+
+
+def unit_device_fields(unit: UnitConfig) -> dict[str, Any]:
+    return {
+        "name": unit.hostname,
+        "manufacturer": MANUFACTURER,
+        "model": unit.model,
+        "serial_number": unit.serial,
+        "configuration_url": f"https://{unit.host}",
+    }
 
 
 class _BaseCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
@@ -187,7 +188,7 @@ class PanOSDeviceCoordinator(_BaseCoordinator):
     @callback
     def _sync_device_registry(self, system: dict[str, Any]) -> None:
         registry = dr.async_get(self.hass)
-        device = registry.async_get_device(identifiers={(DOMAIN, self.unit.serial)})
+        device = get_device(registry, (DOMAIN, self.unit.serial), self.config_entry.entry_id)
         if device is None:
             return
         changes: dict[str, Any] = {}

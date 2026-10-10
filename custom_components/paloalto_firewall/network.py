@@ -57,13 +57,11 @@ def parent_identifier(entry: PanOSConfigEntry) -> tuple[str, str]:
 
 
 def lr_device_info(entry: PanOSConfigEntry, name: str) -> DeviceInfo:
-    return DeviceInfo(
-        identifiers={(DOMAIN, lr_identifier(entry.entry_id, name))},
-        name=name,
-        manufacturer=MANUFACTURER,
-        model="Logical router",
-        via_device=parent_identifier(entry),
-    )
+    """Entity link to a logical router's device (created in setup)."""
+    return DeviceInfo(identifiers={(DOMAIN, lr_identifier(entry.entry_id, name))})
+
+
+LR_DEVICE_FIELDS = {"manufacturer": MANUFACTURER, "model": "Logical router"}
 
 
 def pick_unit(entry: PanOSConfigEntry) -> PanOSUnit:
