@@ -107,6 +107,14 @@ class PanOSClient:
             await self.generate_key()
             return await self._post(data, timeout=timeout)
 
+    async def config_get(self, xpath: str, timeout: int = DEFAULT_TIMEOUT) -> ET.Element:
+        """Read candidate-free running config at ``xpath`` (needs XML API Configuration)."""
+        if not self.api_key:
+            await self.generate_key()
+        return await self._post(
+            {"type": "config", "action": "show", "xpath": xpath}, timeout=timeout
+        )
+
     async def _post(
         self, data: dict[str, str], with_key: bool = True, timeout: int = DEFAULT_TIMEOUT
     ) -> ET.Element:
