@@ -291,3 +291,73 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                         },
                     )
                 self._prev_egress[key] = cur_if
+
+
+def _local_addresses(interfaces: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """The firewall's own addresses -> owning interface."""
+    owned: dict[str, dict[str, Any]] = {}
+    for iface in interfaces.values():
+        for cidr in iface["ips"]:
+            try:
+                owned[str(ipaddress.ip_interface(cidr).ip)] = iface
+            except ValueError:
+                continue
+    return owned
+
+
+def ingress_interface(
+    interfaces: dict[str, dict[str, Any]], fib: list[dict[str, Any]], source: str
+) -> dict[str, Any] | None:
+    """Where traffic from ``source`` enters: its connected interface, else the
+    interface the source is routed via (most specific route in any logical router)."""
+    if found := source_interface(interfaces, source):
+        return found
+    best = None
+    for lr in {r["logical_router"] for r in fib}:
+        if (eg := egress(interfaces, fib, lr, source)) and not eg["drop"]:
+            plen = int(eg["prefix"].split("/")[1])
+            if best is None or plen > best[0]:
+                best = (plen, interfaces.get(eg["interface"] or ""))
+    return best[1] if best else None
+
+
+def trace_path(
+    interfaces: dict[str, dict[str, Any]],
+    fib: list[dict[str, Any]],
+    source: str,
+    destination: str,
+    max_hops: int = 6,
+) -> list[dict[str, Any]]:
+    """Follow a flow through the firewall, one hop per vsys/logical router.
+
+    A hop ends at the egress interface chosen by a FIB lookup. If that hop's
+    next hop is one of the firewall's own addresses (vsys linked by a cable or
+    loop), the flow re-enters on that interface and the trace continues there.
+    """
+    owned = _local_addresses(interfaces)
+    hops: list[dict[str, Any]] = []
+    ingress = ingress_interface(interfaces, fib, source)
+    seen: set[str] = set()
+    while ingress and ingress["name"] not in seen and len(hops) < max_hops:
+        seen.add(ingress["name"])
+        lr = ingress.get("logical_router")
+        hop: dict[str, Any] = {
+            "vsys": ingress.get("vsys"),
+            "logical_router": lr,
+            "ingress_interface": ingress["name"],
+            "from_zone": ingress.get("zone"),
+        }
+        eg = egress(interfaces, fib, lr, destination) if lr else None
+        if eg:
+            hop.update(
+                egress_interface=eg["interface"],
+                to_zone=eg["zone"],
+                nexthop=eg["nexthop"],
+                route=eg["prefix"],
+                dropped=eg["drop"],
+            )
+        hops.append(hop)
+        if not eg or eg["drop"] or not eg["nexthop"]:
+            break
+        ingress = owned.get(eg["nexthop"])
+    return hops

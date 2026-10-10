@@ -93,6 +93,7 @@ POLICY_MATCH = OK.format("""<rules><entry name="IoT-to-Internet"><index>12</inde
 
 POLICY_MATCH_OLD = OK.format("<rules><entry>IoT-to-Internet; index: 12</entry></rules>")
 POLICY_NO_MATCH = OK.format("<rules/>")
+POLICY_DENY = OK.format('<rules><entry name="Block-WanB-Out"><index>4</index><action>deny</action></entry></rules>')
 
 
 # --- Advanced Routing / interfaces (synthetic, same shape as PAN-OS 12.1) ----
@@ -213,6 +214,8 @@ class FakePair:
         self.core_v4_via = "b"
         self.wan_b_up = True
         self.counter_calls = 0
+        self.last_vsys: str | None = None
+        self.deny_vsys: str | None = None
 
     def peer(self, host):
         return next(u for h, u in self.units.items() if h != host)
@@ -237,6 +240,8 @@ class FakePair:
                 return parse_response(
                     '<response status="error"><msg><line>from bogus is invalid</line></msg></response>'
                 )
+            if self.deny_vsys and self.last_vsys == self.deny_vsys:
+                return parse_response(POLICY_DENY)
             return parse_response(POLICY_NO_MATCH if "9.9.9.9" in cmd else POLICY_MATCH)
         table = {
             const.CMD_SYSTEM_INFO: system_info(unit["hostname"], unit["serial"]),
@@ -277,6 +282,7 @@ class FakePair:
         async def op(self, cmd, timeout=30, vsys=None):
             if cmd.startswith("<test>"):
                 fake.vsys_calls.append((cmd, vsys))
+                fake.last_vsys = vsys
             return fake.respond(self.host, cmd)
 
         monkeypatch.setattr(PanOSClient, "generate_key", generate_key)

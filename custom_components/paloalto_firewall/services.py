@@ -29,7 +29,7 @@ from .const import (
     SERVICE_TEST_SECURITY_POLICY,
 )
 from .coordinator import PanOSConfigEntry, PanOSUnit
-from .network import egress, source_interface
+from .network import egress, ingress_interface, trace_path
 
 ATTR_CONFIG_ENTRY_ID = "config_entry_id"
 ATTR_QUERY = "query"
@@ -249,73 +249,70 @@ async def _network_state(
     return interfaces, fib
 
 
-def infer_context(
-    interfaces: dict[str, Any], fib: list[dict[str, Any]], source: str, destination: str
-) -> dict[str, Any]:
-    """Work out vsys, zones and egress the way the firewall would.
+_LIST_CAP = 20
 
-    Ingress: the interface whose connected subnet holds the source, else the
-    interface the source is routed via. Egress: a FIB lookup of the
-    destination in the ingress interface's logical router.
-    """
-    ingress = source_interface(interfaces, source)
-    if ingress is None:
-        best = None
-        for lr in {r["logical_router"] for r in fib}:
-            if (eg := egress(interfaces, fib, lr, source)) and not eg["drop"]:
-                plen = int(eg["prefix"].split("/")[1])
-                if best is None or plen > best[0]:
-                    best = (plen, interfaces.get(eg["interface"] or ""))
-        ingress = best[1] if best else None
-    out: dict[str, Any] = {}
-    if ingress:
-        out.update(
-            ingress_interface=ingress["name"],
-            from_zone=ingress.get("zone"),
-            vsys=ingress.get("vsys"),
-            logical_router=ingress.get("logical_router"),
-        )
-        if ingress.get("logical_router") and (
-            eg := egress(interfaces, fib, ingress["logical_router"], destination)
-        ):
-            out.update(
-                egress_interface=eg["interface"],
-                to_zone=eg["zone"],
-                nexthop=eg["nexthop"],
-                route=eg["prefix"],
-                dropped=eg["drop"],
-            )
+
+def _compact_rule(rule: dict[str, Any]) -> dict[str, Any]:
+    out = {}
+    for k, v in rule.items():
+        if isinstance(v, list) and len(v) > _LIST_CAP:
+            v = v[:_LIST_CAP] + [f"... {len(v) - _LIST_CAP} more"]
+        out[k] = v
     return out
 
 
 async def _run_policy_test(call: ServiceCall, kind: str) -> ServiceResponse:
+    """Run a policy test at every hop the flow takes, or one explicit hop."""
     entry = _get_entry(call.hass, call.data.get(ATTR_CONFIG_ENTRY_ID))
+    base = dict(call.data)
+    explicit = any(base.get(k) for k in ("vsys", "from_zone", "to_zone"))
     last_error: Exception | None = None
     for unit in _candidate_units(entry):
         try:
-            data = dict(call.data)
-            inferred: dict[str, Any] = {}
-            needs = ("vsys", "from_zone", "to_zone") + (("to_interface",) if kind == "nat" else ())
-            if any(not data.get(k) for k in needs):
-                try:
-                    interfaces, fib = await _network_state(entry, unit)
-                    ctx = infer_context(interfaces, fib, data["source"], data["destination"])
-                except (PanOSError, ValueError) as err:
-                    if isinstance(err, PanOSConnectionError):
-                        raise
-                    ctx = {}
-                mapping = {"vsys": "vsys", "from_zone": "from_zone", "to_zone": "to_zone"}
-                if kind == "nat":
-                    mapping["to_interface"] = "egress_interface"
-                for field, key in mapping.items():
-                    if not data.get(field) and ctx.get(key):
-                        data[field] = inferred[field] = ctx[key]
-                path = {k: ctx[k] for k in ("ingress_interface", "logical_router", "egress_interface",
-                                            "nexthop", "route", "dropped") if k in ctx}
+            try:
+                interfaces, fib = await _network_state(entry, unit)
+                trace = trace_path(interfaces, fib, base["source"], base["destination"])
+            except PanOSConnectionError:
+                raise
+            except (PanOSError, ValueError):
+                trace = []
+
+            if explicit:
+                # One hop: the caller's values, gaps filled from the matching hop.
+                match = next((h for h in trace if h["vsys"] == base.get("vsys")), None)
+                match = match or (trace[0] if trace and not base.get("vsys") else {})
+                hop = {**match}
+                for field in ("vsys", "from_zone", "to_zone"):
+                    if base.get(field):
+                        hop[field] = base[field]
+                if kind == "nat" and base.get("to_interface"):
+                    hop["egress_interface"] = base["to_interface"]
+                plan = [hop]
             else:
-                path = {}
-            cmd = build_policy_match_cmd(data) if kind == "security" else build_nat_match_cmd(data)
-            result = await unit.client.op(cmd, timeout=LOOKUP_TIMEOUT, vsys=data.get("vsys"))
+                plan = trace or [{}]
+
+            hops = []
+            for i, hop in enumerate(plan, 1):
+                data = {**base, "vsys": hop.get("vsys"), "from_zone": hop.get("from_zone"),
+                        "to_zone": hop.get("to_zone")}
+                if kind == "nat":
+                    data["to_interface"] = base.get("to_interface") or hop.get("egress_interface")
+                cmd = build_policy_match_cmd(data) if kind == "security" else build_nat_match_cmd(data)
+                result = await unit.client.op(cmd, timeout=LOOKUP_TIMEOUT, vsys=data.get("vsys"))
+                rules = parsers.parse_policy_match(result)
+                first = rules[0] if rules else {}
+                entry_out = {
+                    "hop": i,
+                    **{k: v for k, v in hop.items() if v is not None},
+                    "matched": bool(rules),
+                    "rule": first.get("name"),
+                }
+                if kind == "security":
+                    entry_out["action"] = first.get("action")
+                entry_out["rules"] = [_compact_rule(r) for r in rules]
+                hops.append(entry_out)
+                if hop.get("dropped"):
+                    break
         except PanOSConnectionError as err:
             last_error = err
             continue
@@ -323,30 +320,42 @@ async def _run_policy_test(call: ServiceCall, kind: str) -> ServiceResponse:
             # e.g. an unknown zone, application or vsys name
             raise HomeAssistantError(f"{unit.config.hostname}: {err}") from err
 
-        rules = parsers.parse_policy_match(result)
-        first = rules[0] if rules else {}
+        criteria = {
+            k: v for k, v in base.items()
+            if k not in (ATTR_CONFIG_ENTRY_ID, "show_all") and v not in (None, "")
+        }
         response: dict[str, Any] = {
             "firewall": unit.config.hostname,
-            "criteria": {
-                k: v for k, v in data.items()
-                if k not in (ATTR_CONFIG_ENTRY_ID, "show_all") and v not in (None, "")
-            },
-            "inferred": inferred,
-            "path": path,
-            "matched": bool(rules),
-            "rule": first.get("name"),
-            "rules": rules,
+            "criteria": criteria,
+            "mode": "explicit" if explicit else "traced",
+            "hops": hops,
         }
         if kind == "security":
-            response["action"] = first.get("action")
-            if not rules:
-                response["note"] = (
-                    "No security rule matched; the default rules apply "
-                    "(intrazone-default allows, interzone-default denies)."
+            # The flow is allowed only if every hop allows it.
+            deciding = next(
+                (h for h in hops if not h["matched"] or h["action"] != "allow"), None
+            )
+            if deciding is None and hops:
+                response.update(verdict="allow", rule=hops[-1]["rule"], decided_at_hop=None)
+            elif deciding is not None:
+                response.update(
+                    verdict=deciding["action"] or "default",
+                    rule=deciding["rule"],
+                    decided_at_hop=deciding["hop"],
                 )
-        elif not rules:
-            response["note"] = "No NAT rule matched; the traffic is not translated."
-        if path.get("dropped"):
+                if not deciding["matched"]:
+                    response["note"] = (
+                        f"No security rule matched at hop {deciding['hop']}; the default rule "
+                        "applies there (intrazone-default allows, interzone-default denies)."
+                    )
+        else:
+            translations = [
+                {"hop": h["hop"], "vsys": h.get("vsys"), "rule": h["rule"]} for h in hops if h["matched"]
+            ]
+            response["translations"] = translations
+            if not translations:
+                response["note"] = "No NAT rule matched at any hop; the traffic is not translated."
+        if any(h.get("dropped") for h in hops):
             response["note"] = "The destination is routed to a drop (blackhole) route."
         return response
     raise HomeAssistantError(f"No firewall could be reached: {last_error}")
@@ -381,10 +390,10 @@ async def _async_route_lookup(call: ServiceCall) -> ServiceResponse:
                 )
             lrs, chosen_by = [lr], "logical_router"
         elif src := call.data.get("source"):
-            ctx = infer_context(interfaces, fib, src, destination)
-            if not ctx.get("logical_router"):
+            ingress = ingress_interface(interfaces, fib, src)
+            if not ingress or not ingress.get("logical_router"):
                 raise ServiceValidationError(f"Could not tell which logical router {src} uses")
-            lrs, chosen_by = [ctx["logical_router"]], f"source {src} ({ctx.get('ingress_interface')})"
+            lrs, chosen_by = [ingress["logical_router"]], f"source {src} ({ingress['name']})"
         else:
             lrs, chosen_by = all_lrs, "all logical routers"
 

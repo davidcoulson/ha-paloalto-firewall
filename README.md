@@ -152,46 +152,57 @@ matches:
 
 If one table can't be read (for example, no DHCP server is configured), the other is still returned and the problem is listed under `errors`.
 
-## Test security policy
+## Test security and NAT policy (hop by hop)
 
-`paloalto_firewall.test_security_policy` asks the active firewall which security rule would match a given flow. It's the same as the CLI `test security-policy-match`:
+`paloalto_firewall.test_security_policy` (CLI `test security-policy-match`) and `paloalto_firewall.test_nat_policy` (CLI `test nat-policy-match`) work out which rules a flow hits.
+
+Leave vsys and zones empty, and the flow is **traced through every vsys it crosses**:
+
+1. It enters on the interface whose subnet holds the source (or the interface the source is routed via).
+2. A FIB lookup in that interface's logical router picks the egress interface. Those two interfaces give the hop's vsys, from-zone and to-zone.
+3. If the next hop is one of the firewall's own addresses (vsys linked by a cable or loop), the flow re-enters there, and the trace continues in that vsys.
+
+The policy test runs at each hop:
 
 ```yaml
 action: paloalto_firewall.test_security_policy
 data:
-  source: 10.2.4.86
+  source: 10.2.4.159
   destination: 1.1.1.1
-  protocol: tcp          # tcp | udp | icmp | protocol number (default tcp)
   destination_port: 443
-  from_zone: IoT         # optional: inferred from the source IP's interface
-  to_zone: Spectrum      # optional: inferred from a route lookup
-  vsys: vsys1            # optional: inferred from the source interface (multi-vsys)
-  application: ssl       # optional App-ID
-  # source_user, category, show_all are also available
+  application: ssl       # recommended: without it the first rule that *could* match is reported
 response_variable: result
 ```
 
-Response:
-
 ```yaml
-firewall: fw1
-matched: true
-rule: IoT-to-Internet
-action: allow
-rules:
-  - name: IoT-to-Internet
-    index: 12
+mode: traced
+verdict: allow            # first hop that doesn't allow decides; otherwise allow
+rule: Internet
+decided_at_hop: null
+hops:
+  - hop: 1
+    vsys: vsys1
+    logical_router: core-vr
+    ingress_interface: ae1.104
+    from_zone: IoT
+    egress_interface: ae11.101
+    to_zone: Spectrum
+    rule: URL Filtering
     action: allow
-    from: [iot]
-    to: [untrust]
-    ...
+    rules: [...]
+  - hop: 2
+    vsys: vsys3
+    logical_router: spectrum-vr
+    ingress_interface: ae12.101
+    from_zone: Core
+    egress_interface: ethernet1/13
+    to_zone: Internet
+    rule: Internet
+    action: allow
+    rules: [...]
 ```
 
-Anything you leave out of vsys, `from_zone` or `to_zone` is worked out the way the firewall would: from the interface whose subnet holds the source, and a FIB lookup of the destination in that interface's logical router. What was filled in is returned under `inferred`, and the route taken under `path`.
-
-`paloalto_firewall.test_nat_policy` works the same way (CLI `test nat-policy-match`), and also infers the egress `to_interface`.
-
-If no rule matches, `matched` is false and the default rules apply. Errors from the firewall, such as an unknown zone or application name, are raised as action errors.
+If you set any of `vsys`, `from_zone` or `to_zone`, that **single hop** is tested, and anything you left out is filled in from the matching traced hop. NAT tests also pass each hop's egress interface as `to-interface`, and list the NAT rules hit under `translations`.
 
 ## Icons
 

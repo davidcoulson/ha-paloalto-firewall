@@ -269,8 +269,9 @@ async def test_security_policy_action(hass: HomeAssistant, fake) -> None:
         blocking=True, return_response=True,
     )
     assert result["firewall"] == "fw1"  # the active unit
-    assert result["matched"] is True
-    assert result["rule"] == "IoT-to-Internet" and result["action"] == "allow"
+    assert result["mode"] == "explicit"
+    assert result["hops"][0]["matched"] is True
+    assert result["rule"] == "IoT-to-Internet" and result["verdict"] == "allow"
     assert result["criteria"]["protocol"] == 6
     assert {h for h, _ in fake.calls} == {"fw1.lan"}
 
@@ -278,7 +279,7 @@ async def test_security_policy_action(hass: HomeAssistant, fake) -> None:
         DOMAIN, "test_security_policy", {"source": "10.2.4.86", "destination": "9.9.9.9"},
         blocking=True, return_response=True,
     )
-    assert result["matched"] is False and result["rule"] is None and "note" in result
+    assert result["hops"][-1]["matched"] is False and "note" in result
 
     with pytest.raises(HomeAssistantError, match="bogus"):
         await hass.services.async_call(
@@ -360,23 +361,51 @@ async def test_route_lookup_and_inferred_policy_tests(hass: HomeAssistant, fake)
     with pytest.raises(ServiceValidationError):
         await call("route_lookup", {"destination": "1.1.1.1", "logical_router": "nope"})
 
+    # Traced: IoT (vsys1, core-vr) -> WanB, then re-enters on ae9.201 (vsys3, wan-b-vr) -> Internet.
     fake.vsys_calls.clear()
     r = await call("test_security_policy", {"source": "10.9.20.50", "destination": "1.1.1.1", "destination_port": 443})
-    assert r["inferred"] == {"vsys": "vsys1", "from_zone": "IoT", "to_zone": "WanB"}
-    assert r["path"]["egress_interface"] == "ae9.101"
-    cmd, vsys = fake.vsys_calls[-1]
-    assert vsys == "vsys1" and "<from>IoT</from><to>WanB</to>" in cmd
+    assert r["mode"] == "traced"
+    assert [(h["vsys"], h["from_zone"], h["to_zone"], h["egress_interface"]) for h in r["hops"]] == [
+        ("vsys1", "IoT", "WanB", "ae9.101"),
+        ("vsys3", "Core", "Internet", "ethernet1/2"),
+    ]
+    assert [h["rule"] for h in r["hops"]] == ["IoT-to-Internet", "IoT-to-Internet"]
+    assert r["verdict"] == "allow" and r["decided_at_hop"] is None
+    assert [v for _, v in fake.vsys_calls] == ["vsys1", "vsys3"]
+    assert "<from>IoT</from><to>WanB</to>" in fake.vsys_calls[0][0]
+    assert "<from>Core</from><to>Internet</to>" in fake.vsys_calls[1][0]
 
-    # Explicit values win over inference.
+    # A deny in the second vsys decides the verdict.
+    fake.deny_vsys = "vsys3"
+    r = await call("test_security_policy", {"source": "10.9.20.50", "destination": "1.1.1.1"})
+    assert r["verdict"] == "deny" and r["rule"] == "Block-WanB-Out" and r["decided_at_hop"] == 2
+    fake.deny_vsys = None
+
+    # Local destination: a single hop.
+    r = await call("test_security_policy", {"source": "10.9.20.50", "destination": "10.9.1.5"})
+    assert [(h["from_zone"], h["to_zone"]) for h in r["hops"]] == [("IoT", "Trusted")]
+
+    # Explicit vsys: one hop, gaps filled from the matching traced hop.
+    fake.vsys_calls.clear()
+    r = await call("test_security_policy", {"source": "10.9.20.50", "destination": "1.1.1.1", "vsys": "vsys3"})
+    assert r["mode"] == "explicit" and len(r["hops"]) == 1
+    assert (r["hops"][0]["from_zone"], r["hops"][0]["to_zone"]) == ("Core", "Internet")
+    assert fake.vsys_calls == [(fake.vsys_calls[0][0], "vsys3")]
+
+    # Explicit zones win.
     r = await call("test_security_policy", {"source": "10.9.20.50", "destination": "1.1.1.1",
                                             "from_zone": "Trusted", "to_zone": "WanA", "vsys": "vsys1"})
-    assert r["inferred"] == {}
     assert "<from>Trusted</from><to>WanA</to>" in fake.vsys_calls[-1][0]
 
+    # NAT: tested at every hop with that hop's egress interface.
+    fake.vsys_calls.clear()
     r = await call("test_nat_policy", {"source": "10.9.20.50", "destination": "1.1.1.1", "destination_port": 443})
-    assert r["rule"] == "IoT-Hide-NAT"
-    assert r["inferred"]["to_interface"] == "ae9.101"
-    assert "<to-interface>ae9.101</to-interface>" in fake.vsys_calls[-1][0]
+    assert [h["egress_interface"] for h in r["hops"]] == ["ae9.101", "ethernet1/2"]
+    assert "<to-interface>ethernet1/2</to-interface>" in fake.vsys_calls[1][0]
+    assert r["translations"] == [
+        {"hop": 1, "vsys": "vsys1", "rule": "IoT-Hide-NAT"},
+        {"hop": 2, "vsys": "vsys3", "rule": "IoT-Hide-NAT"},
+    ]
 
 
 async def test_standalone_network_entities(hass: HomeAssistant, fake) -> None:

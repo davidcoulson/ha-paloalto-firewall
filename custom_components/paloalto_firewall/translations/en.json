@@ -106,7 +106,7 @@
     },
     "test_security_policy": {
       "name": "Test security policy",
-      "description": "Ask the firewall which security rule would match the given traffic (CLI 'test security-policy-match'). vsys and zones are inferred from the source and destination when not given.",
+      "description": "Ask the firewall which security rules a flow hits (CLI 'test security-policy-match'). Without vsys/zones, the flow is traced through every vsys it crosses and tested at each hop; the response lists each hop's rule and an overall verdict.",
       "fields": {
         "source": {
           "name": "Source IP",
@@ -126,11 +126,11 @@
         },
         "from_zone": {
           "name": "Source zone",
-          "description": "Source zone. Leave empty to work it out from the source IP's interface and a route lookup."
+          "description": "Source zone. Setting any of vsys or zones tests that single hop; leave all empty to trace every hop."
         },
         "to_zone": {
           "name": "Destination zone",
-          "description": "Destination zone. Leave empty to work it out from the source IP's interface and a route lookup."
+          "description": "Destination zone. Setting any of vsys or zones tests that single hop; leave all empty to trace every hop."
         },
         "application": {
           "name": "Application",
@@ -154,13 +154,13 @@
         },
         "vsys": {
           "name": "vsys",
-          "description": "Virtual system to test in (multi-vsys). Leave empty to work it out from the source IP's interface and a route lookup."
+          "description": "Virtual system to test in (multi-vsys). Setting any of vsys or zones tests that single hop; leave all empty to trace every hop."
         }
       }
     },
     "test_nat_policy": {
       "name": "Test NAT policy",
-      "description": "Ask the firewall which NAT rule would match the given traffic (CLI 'test nat-policy-match'). vsys, zones and egress interface are inferred when not given.",
+      "description": "Ask the firewall which NAT rules a flow hits (CLI 'test nat-policy-match'). Without vsys/zones, the flow is traced through every vsys it crosses and tested at each hop.",
       "fields": {
         "source": {
           "name": "Source IP",
@@ -184,11 +184,11 @@
         },
         "from_zone": {
           "name": "Source zone",
-          "description": "Source zone. Leave empty to work it out from the source IP's interface and a route lookup."
+          "description": "Source zone. Setting any of vsys or zones tests that single hop; leave all empty to trace every hop."
         },
         "to_zone": {
           "name": "Destination zone",
-          "description": "Destination zone. Leave empty to work it out from the source IP's interface and a route lookup."
+          "description": "Destination zone. Setting any of vsys or zones tests that single hop; leave all empty to trace every hop."
         },
         "to_interface": {
           "name": "Egress interface",
@@ -196,7 +196,7 @@
         },
         "vsys": {
           "name": "vsys",
-          "description": "Virtual system to test in (multi-vsys). Leave empty to work it out from the source IP's interface and a route lookup."
+          "description": "Virtual system to test in (multi-vsys). Setting any of vsys or zones tests that single hop; leave all empty to trace every hop."
         },
         "config_entry_id": {
           "name": "Firewall",
