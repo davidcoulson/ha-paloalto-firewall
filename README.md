@@ -1,5 +1,7 @@
 # Palo Alto Networks Firewall for Home Assistant
 
+[![CI](https://github.com/davidcoulson/ha-paloalto-firewall/actions/workflows/ci.yml/badge.svg)](https://github.com/davidcoulson/ha-paloalto-firewall/actions/workflows/ci.yml)
+
 Monitors PAN-OS firewalls over the XML API — standalone, or an **active/passive HA pair** treated as one unit.
 
 Built as a modern replacement for [FoUStep/ha-pan-customintegration](https://github.com/FoUStep/ha-pan-customintegration) (itself a fork of Skalavala's 2018 sensor). It reuses the same operational commands but adds a UI config flow, async polling, devices, HA-pair awareness and update/licence tracking.
@@ -239,6 +241,18 @@ The Palo Alto Networks icon and logo ship in `custom_components/paloalto_firewal
 
 *Configure* on the integration: status poll interval (default 60 s, min 15 s) and update/licence check interval (default 6 h).
 
+### Polling tiers
+
+| Every poll (scan interval) | Every 5 minutes | Every 6 hours (configurable) |
+|---|---|---|
+| system/HA/session/resources, interfaces, FIB/egress, path monitors, interface counters | jobs, uncommitted changes, delegated prefixes + NPTv6 check, BGP peers | software/content checks, licences |
+
+The 5-minute tier also refreshes immediately after a failover, so prefix and BGP events can lag a real change by up to 5 minutes.
+
+### Debug diagnostics
+
+With debug logging enabled for the integration, *Download diagnostics* also includes the raw XML of the network commands it parses (interfaces, FIB, path monitors, jobs, prefixes, running NAT per vsys, BGP per logical router) plus global drop counters. Addresses aren't redacted in that section, so review it before sharing.
+
 ## Commands used
 
 `show system info`, `show high-availability state`, `show session info`, `show system resources`, `show running resource-monitor minute last 1`, `show system environmentals`, `show global-protect-gateway current-user`, `show admins`, `show vpn ipsec-sa`, `request system software check`, `request content upgrade check`, `request license info`.
@@ -248,8 +262,8 @@ Commands that a model doesn't support (environmentals on VM-series, GlobalProtec
 ## Tests
 
 ```
-pip install pytest-homeassistant-custom-component
+pip install -r requirements_test.txt
 pytest
 ```
 
-The tests run against a simulated HA pair (`tests/fakefw.py`) covering the config flow, outage of either unit, clean failover, split-brain detection, re-auth and options.
+CI runs the tests against Home Assistant 2026.10 (Python 3.14), plus hassfest and HACS validation, on every push and weekly. The tests run against a simulated HA pair (`tests/fakefw.py`) covering the config flow, outage of either unit, clean failover, split-brain detection, re-auth and options.
