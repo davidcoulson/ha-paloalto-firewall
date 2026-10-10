@@ -10,12 +10,14 @@ import asyncio
 import ipaddress
 import logging
 import time
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.util import dt as dt_util
 
 from . import parsers
 from .api import PanOSAuthError, PanOSError
@@ -36,12 +38,12 @@ from .const import (
     MANUFACTURER,
     PROBE_IPV4,
     PROBE_IPV6,
+    SLOW_INTERVAL,
     lr_identifier,
     pair_identifier,
 )
 
 if TYPE_CHECKING:
-    from datetime import timedelta
 
     from .coordinator import PanOSConfigEntry, PanOSUnit
 
@@ -161,6 +163,11 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         self._prev_prefix: dict[str, str | None] = {}
         self._prev_bgp: dict[tuple[str, str], bool] = {}
         self._warned: set[str] = set()
+        # Slow tier: jobs, pending changes, prefixes/NAT and BGP change rarely
+        # and some (running NAT, per-LR BGP) are comparatively expensive.
+        self.slow_interval = timedelta(seconds=SLOW_INTERVAL)
+        self._slow_at: datetime | None = None
+        self._slow: dict[str, Any] = {}
 
     async def _optional(self, unit: PanOSUnit, key: str, cmd: str, parser) -> Any:
         try:
@@ -193,12 +200,11 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             self._prev_counters.clear()
             self.unit_hostname = unit.config.hostname
 
-        interfaces, fib, path_monitors, jobs, pending = await asyncio.gather(
+        unit_changed = unit.config.hostname != self._slow.get("unit")
+        interfaces, fib, path_monitors = await asyncio.gather(
             self._optional(unit, "interfaces", CMD_INTERFACE_ALL, parsers.parse_interfaces),
             self._optional(unit, "fib", CMD_FIB, parsers.parse_fib),
             self._optional(unit, "path_monitor", CMD_PATH_MONITOR, parsers.parse_path_monitor),
-            self._optional(unit, "jobs", CMD_JOBS, parsers.parse_jobs),
-            self._optional(unit, "pending", CMD_PENDING_CHANGES, parsers.parse_pending_changes),
         )
         if interfaces is None:
             raise UpdateFailed(f"{unit.config.host}: could not read interfaces")
@@ -208,8 +214,6 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             "interfaces": interfaces,
             "fib": fib,
             "path_monitors": path_monitors,
-            "jobs": jobs,
-            "pending_changes": pending,
         }
 
         data["egress"] = {
@@ -223,12 +227,35 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         }
         data["path_groups"] = self._group_path_monitors(interfaces, path_monitors or [])
         data["counters"] = await self._counters(unit, self.selected_interfaces(data))
-        data["prefix_pools"] = await self._prefix_pools(unit, interfaces)
-        data["bgp"] = await self._bgp(unit)
         self._fire_egress_events(data["egress"])
-        self._fire_prefix_events(data["prefix_pools"])
-        self._fire_bgp_events(data["bgp"])
+
+        now = dt_util.utcnow()
+        if unit_changed or self._slow_at is None or now - self._slow_at >= self.slow_interval:
+            await self._refresh_slow(unit, interfaces)
+            self._slow_at = now
+        data.update({k: v for k, v in self._slow.items() if k != "unit"})
         return data
+
+    def request_slow_refresh(self) -> None:
+        """Make the next poll re-read the slow tier."""
+        self._slow_at = None
+
+    async def _refresh_slow(self, unit: PanOSUnit, interfaces: dict[str, Any]) -> None:
+        jobs, pending, prefix_pools, bgp = await asyncio.gather(
+            self._optional(unit, "jobs", CMD_JOBS, parsers.parse_jobs),
+            self._optional(unit, "pending", CMD_PENDING_CHANGES, parsers.parse_pending_changes),
+            self._prefix_pools(unit, interfaces),
+            self._bgp(unit),
+        )
+        self._slow = {
+            "unit": unit.config.hostname,
+            "jobs": jobs,
+            "pending_changes": pending,
+            "prefix_pools": prefix_pools,
+            "bgp": bgp,
+        }
+        self._fire_prefix_events(prefix_pools)
+        self._fire_bgp_events(bgp)
 
     async def _bgp(self, unit: PanOSUnit) -> dict[str, dict[str, Any]]:
         """{logical router: {router_id, local_as, peers}} for BGP-enabled routers."""

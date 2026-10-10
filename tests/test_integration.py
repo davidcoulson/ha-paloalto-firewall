@@ -20,6 +20,8 @@ from custom_components.paloalto_firewall.const import (
     EVENT_FAILOVER,
 )
 
+from custom_components.paloalto_firewall.devices import get_device
+
 from .fakefw import FakePair
 
 USER_INPUT = {
@@ -30,6 +32,12 @@ USER_INPUT = {
     CONF_PASSWORD: "pw",
     CONF_VERIFY_SSL: False,
 }
+
+
+async def _tick(hass: HomeAssistant, freezer, seconds: int) -> None:
+    freezer.tick(timedelta(seconds=seconds))
+    async_fire_time_changed(hass, dt_util.utcnow())
+    await hass.async_block_till_done(wait_background_tasks=True)
 
 
 @pytest.fixture
@@ -314,8 +322,8 @@ async def test_network_entities_and_egress_change(hass: HomeAssistant, fake) -> 
     assert st("binary_sensor.core_vr_path_monitor_ae9_101_via_fd00_99_b_1").state == "off"
 
     reg = dr.async_get(hass)
-    lr_dev = reg.async_get_device(identifiers={(DOMAIN, f"{entry.entry_id}_lr_core-vr")})
-    pair_dev = reg.async_get_device(identifiers={(DOMAIN, f"{entry.entry_id}_ha_pair")})
+    lr_dev = get_device(reg, (DOMAIN, f"{entry.entry_id}_lr_core-vr"), entry.entry_id)
+    pair_dev = get_device(reg, (DOMAIN, f"{entry.entry_id}_ha_pair"), entry.entry_id)
     assert lr_dev.via_device_id == pair_dev.id
 
     # Next poll: throughput appears; then WAN B fails and core-vr moves to WAN A.
@@ -427,8 +435,8 @@ async def test_standalone_network_entities(hass: HomeAssistant, fake) -> None:
     assert hass.states.get("sensor.fw1_running_jobs").state == "1"
     assert hass.states.get("sensor.core_vr_internet_egress").state == "WanB"
     reg = dr.async_get(hass)
-    lr_dev = reg.async_get_device(identifiers={(DOMAIN, f"{entry.entry_id}_lr_core-vr")})
-    fw_dev = reg.async_get_device(identifiers={(DOMAIN, "0123456789001")})
+    lr_dev = get_device(reg, (DOMAIN, f"{entry.entry_id}_lr_core-vr"), entry.entry_id)
+    fw_dev = get_device(reg, (DOMAIN, "0123456789001"), entry.entry_id)
     assert lr_dev.via_device_id == fw_dev.id
 
 
@@ -448,7 +456,7 @@ async def test_options_interface_selection(hass: HomeAssistant, fake) -> None:
     assert er.async_get(hass).async_get("sensor.edge_ha_pair_ethernet1_1_in") is None
 
 
-async def test_prefix_pools_and_npt_mismatch(hass: HomeAssistant, fake) -> None:
+async def test_prefix_pools_and_npt_mismatch(hass: HomeAssistant, fake, freezer) -> None:
     entry = await _setup(hass, fake)
     st = hass.states.get
     a = st("sensor.edge_ha_pair_wan_a_delegated_prefix")
@@ -468,8 +476,10 @@ async def test_prefix_pools_and_npt_mismatch(hass: HomeAssistant, fake) -> None:
     # ISP hands out a new prefix: event fires and the mismatch sensor flips on.
     events = async_capture_events(hass, "paloalto_firewall_prefix_change")
     fake.wan_b_prefix = "2001:db8:c00::/56"
-    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=61))
-    await hass.async_block_till_done(wait_background_tasks=True)
+    await _tick(hass, freezer, 61)  # fast poll only: prefixes are slow-tier
+    assert events == []
+    assert st("sensor.edge_ha_pair_wan_b_delegated_prefix").state == "2001:db8:b00::/56"
+    await _tick(hass, freezer, 240)
     assert [e.data for e in events] == [{
         "entry_id": entry.entry_id, "pool": "wan-b", "interface": "ethernet1/2",
         "previous_prefix": "2001:db8:b00::/56", "prefix": "2001:db8:c00::/56",
@@ -493,7 +503,7 @@ async def test_stale_path_monitor_entities_removed(hass: HomeAssistant, fake) ->
     assert reg.async_get(keep) is not None
 
 
-async def test_bgp_peers(hass: HomeAssistant, fake) -> None:
+async def test_bgp_peers(hass: HomeAssistant, fake, freezer) -> None:
     from homeassistant.helpers import entity_registry as er
 
     entry = await _setup(hass, fake)
@@ -510,8 +520,7 @@ async def test_bgp_peers(hass: HomeAssistant, fake) -> None:
 
     events = async_capture_events(hass, "paloalto_firewall_bgp_peer_change")
     fake.dns_bgp_up = False
-    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=61))
-    await hass.async_block_till_done(wait_background_tasks=True)
+    await _tick(hass, freezer, 301)
     assert st("binary_sensor.core_vr_bgp_dns_anycast_0").state == "off"
     assert st("sensor.core_vr_bgp_peers_established").state == "1"
     assert st("sensor.core_vr_bgp_peers_established").attributes["down"] == ["dns-anycast-0"]
@@ -526,3 +535,46 @@ async def test_bgp_peers(hass: HomeAssistant, fake) -> None:
     await hass.async_block_till_done(wait_background_tasks=True)
     assert reg.async_get(stale.entity_id) is None
     assert reg.async_get("binary_sensor.core_vr_bgp_dns_anycast_0") is not None
+
+
+async def test_slow_tier_polling(hass: HomeAssistant, fake, freezer) -> None:
+    from custom_components.paloalto_firewall.const import CMD_BGP_SUMMARY, CMD_JOBS
+
+    await _setup(hass, fake)
+
+    def count(cmd):
+        return sum(1 for _, c in fake.calls if c == cmd)
+
+    jobs, bgp, ifaces = count(CMD_JOBS), count(CMD_BGP_SUMMARY), fake.counter_calls
+    assert jobs == 1 and bgp == 1
+    await _tick(hass, freezer, 61)
+    assert count(CMD_JOBS) == 1 and count(CMD_BGP_SUMMARY) == 1
+    assert fake.counter_calls > ifaces  # fast tier still polled
+    assert hass.states.get("sensor.core_vr_bgp_peers_established").state == "2"  # cached
+    await _tick(hass, freezer, 240)
+    assert count(CMD_JOBS) == 2 and count(CMD_BGP_SUMMARY) == 2
+
+
+async def test_diagnostics_raw_samples_only_at_debug(hass: HomeAssistant, fake) -> None:
+    import logging
+
+    from custom_components.paloalto_firewall.diagnostics import (
+        async_get_config_entry_diagnostics,
+    )
+
+    entry = await _setup(hass, fake)
+    diag = await async_get_config_entry_diagnostics(hass, entry)
+    assert diag.get("raw_command_samples") is None
+    assert diag["entry"]["data"]["password"] == "**REDACTED**"
+
+    logger = logging.getLogger("custom_components.paloalto_firewall")
+    old = logger.level
+    logger.setLevel(logging.DEBUG)
+    try:
+        diag = await async_get_config_entry_diagnostics(hass, entry)
+    finally:
+        logger.setLevel(old)
+    raw = diag["raw_command_samples"]
+    assert "xml" in raw["interface_all"] and "xml" in raw["fib"]
+    assert {"running_nat_vsys2", "running_nat_vsys3", "bgp_peers_core-vr"} <= set(raw)
+    assert "error" in raw["drop_counters"]  # not simulated; captured, not raised

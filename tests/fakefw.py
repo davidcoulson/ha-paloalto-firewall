@@ -368,6 +368,10 @@ class FakePair:
             const.CMD_ARP_ALL: ARP,
             const.CMD_DHCP_LEASES: DHCP,
         }
+        if cmd not in table:
+            return parse_response(
+                '<response status="error"><msg><line>Invalid syntax.</line></msg></response>'
+            )
         return parse_response(table[cmd])
 
     def patch(self, monkeypatch):

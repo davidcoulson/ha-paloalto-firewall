@@ -19,6 +19,7 @@ DEFAULT_NAME = "Palo Alto"
 DEFAULT_SCAN_INTERVAL = 60  # seconds
 DEFAULT_UPDATE_INTERVAL = 6  # hours
 MIN_SCAN_INTERVAL = 15
+SLOW_INTERVAL = 300  # seconds: jobs, pending changes, prefixes/NAT, BGP
 
 EVENT_FAILOVER = f"{DOMAIN}_failover"
 
