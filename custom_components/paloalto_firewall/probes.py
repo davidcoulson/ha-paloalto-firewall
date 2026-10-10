@@ -108,6 +108,29 @@ async def collect(client: PanOSClient) -> dict[str, Any]:
     out["sec_test_vsys"] = await _run(client, sec, vsys_name)
     out.update(await _ipv6_wan(client, iface_xml))
     out.update(await _pd_and_nat(client, iface_xml))
+    out.update(await _bgp(client, iface_xml))
+    return out
+
+
+async def _bgp(client: PanOSClient, iface_xml: str) -> dict[str, Any]:
+    """Advanced Routing BGP output variants (peer status/summary/detail)."""
+    out: dict[str, Any] = {}
+    ifaces = _ifaces_from(iface_xml)
+    lrs = sorted({i["logical_router"] for i in ifaces.values() if i.get("logical_router")})
+    base = "<show><advanced-routing><bgp>{}</bgp></advanced-routing></show>"
+    for label, inner in {
+        "summary": "<summary></summary>",
+        "peer_status": "<peer><status></status></peer>",
+        "peer_detail": "<peer><detail></detail></peer>",
+        "peer_group": "<peer-group></peer-group>",
+    }.items():
+        out[f"bgp_{label}"] = await _run(client, base.format(inner))
+    for lr in lrs:
+        for label, inner in {
+            "summary": f"<summary><logical-router>{lr}</logical-router></summary>",
+            "peer_status": f"<peer><status><logical-router>{lr}</logical-router></status></peer>",
+        }.items():
+            out[f"bgp_{label}_{lr}"] = await _run(client, base.format(inner))
     return out
 
 
