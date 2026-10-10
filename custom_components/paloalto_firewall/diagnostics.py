@@ -12,14 +12,25 @@ from . import probes
 from .coordinator import PanOSConfigEntry
 
 TO_REDACT = {
-    CONF_PASSWORD, CONF_USERNAME, "users", "admins", "mgmt_ip", "peer_mgmt_ip",
-    "ips", "nexthop", "monitors", "host", "routes", "sessions", "gp_previous", "gp_current", "gp_users",
+    CONF_PASSWORD,
+    CONF_USERNAME,
+    "users",
+    "admins",
+    "mgmt_ip",
+    "peer_mgmt_ip",
+    "ips",
+    "nexthop",
+    "monitors",
+    "host",
+    "routes",
+    "sessions",
+    "gp_previous",
+    "gp_current",
+    "gp_users",
 }
 
 
-async def async_get_config_entry_diagnostics(
-    hass: HomeAssistant, entry: PanOSConfigEntry
-) -> dict[str, Any]:
+async def async_get_config_entry_diagnostics(hass: HomeAssistant, entry: PanOSConfigEntry) -> dict[str, Any]:
     runtime = entry.runtime_data
     pair = runtime.pair
     raw: dict[str, Any] | None = None

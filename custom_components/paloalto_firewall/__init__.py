@@ -28,7 +28,6 @@ from .const import (
     lr_identifier,
     pair_identifier,
 )
-from .devices import ensure_device
 from .coordinator import (
     PanOSConfigEntry,
     PanOSDeviceCoordinator,
@@ -39,7 +38,14 @@ from .coordinator import (
     UnitConfig,
     unit_device_fields,
 )
-from .network import LR_DEVICE_FIELDS, PanOSNetworkCoordinator, pm_key_suffix, safe_key
+from .devices import ensure_device
+from .network import (
+    LR_DEVICE_FIELDS,
+    PanOSNetworkCoordinator,
+    cert_uid_suffix,
+    pm_key_suffix,
+    safe_key,
+)
 from .services import async_setup_services
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
@@ -64,9 +70,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: PanOSConfigEntry) -> boo
             hostname=raw["hostname"],
             model=raw.get("model"),
         )
-        client = PanOSClient(
-            session, unit.host, entry.data[CONF_USERNAME], entry.data[CONF_PASSWORD]
-        )
+        client = PanOSClient(session, unit.host, entry.data[CONF_USERNAME], entry.data[CONF_PASSWORD])
         units.append(
             PanOSUnit(
                 config=unit,
@@ -108,9 +112,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: PanOSConfigEntry) -> boo
         runtime.pair.async_start()
     entry.runtime_data = runtime
 
-    runtime.network = PanOSNetworkCoordinator(
-        hass, entry, scan, entry.options.get(CONF_INTERFACES)
-    )
+    runtime.network = PanOSNetworkCoordinator(hass, entry, scan, entry.options.get(CONF_INTERFACES))
     # Not fatal: if the interface/routing commands can't be read yet, the
     # network devices and entities are created after the first good poll.
     await runtime.network.async_refresh()
@@ -129,8 +131,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: PanOSConfigEntry) -> boo
             if lr not in lr_devices:
                 lr_devices.add(lr)
                 ensure_device(
-                    hass, entry, (DOMAIN, lr_identifier(entry.entry_id, lr)), lr_parent,
-                    name=lr, **LR_DEVICE_FIELDS,
+                    hass,
+                    entry,
+                    (DOMAIN, lr_identifier(entry.entry_id, lr)),
+                    lr_parent,
+                    name=lr,
+                    **LR_DEVICE_FIELDS,
                 )
 
     _sync_lr_devices()
@@ -144,9 +150,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: PanOSConfigEntry) -> boo
 
     # Update checks contact the update server and can take a minute; don't
     # hold up startup for them.
-    for unit in units:
+    for pan_unit in units:
         entry.async_create_background_task(
-            hass, unit.updates.async_refresh(), f"{DOMAIN} update check {unit.config.host}"
+            hass, pan_unit.updates.async_refresh(), f"{DOMAIN} update check {pan_unit.config.host}"
         )
 
     entry.async_on_unload(entry.add_update_listener(_async_options_updated))
@@ -182,9 +188,7 @@ def _remove_stale_network_entities(hass: HomeAssistant, entry: PanOSConfigEntry)
         for name in wanted
         for suffix in ("link", "in", "out", "speed")
     }
-    prune_ifs = network.configured_interfaces is not None or (
-        ok.get("fib") and ok.get("path_monitors")
-    )
+    prune_ifs = network.configured_interfaces is not None or (ok.get("fib") and ok.get("path_monitors"))
     pm_prefix = f"{entry.entry_id}_pm_"
     pm_keep = {f"{pm_prefix}{pm_key_suffix(k)}" for k in data["path_groups"]}
     bgp_prefix = f"{entry.entry_id}_bgp_"
@@ -198,9 +202,11 @@ def _remove_stale_network_entities(hass: HomeAssistant, entry: PanOSConfigEntry)
     prune_bgp = ok.get("bgp") and all(info["ok"] for info in data.get("bgp", {}).values())
     cert_prefix = f"{entry.entry_id}_cert_"
     certs = data.get("certificates")
-    cert_keep = {f"{cert_prefix}expiring"} | {
-        f"{cert_prefix}{safe_key(c['name'])}" for c in (certs or {}).get("device", [])
-    }
+    cert_keep = {f"{cert_prefix}expiring"}
+    for c in (certs or {}).get("device", []):
+        cert_keep.add(f"{entry.entry_id}_{cert_uid_suffix(c['name'], c.get('vsys'))}")
+        # Pre-0.7.4 id; the sensor platform migrates it to the one above.
+        cert_keep.add(f"{cert_prefix}{safe_key(c['name'])}")
     # Logical routers: only judged gone when interfaces and the FIB (which
     # together define the router list) were both read fresh.
     prune_lrs = ok.get("interfaces") and ok.get("fib")
@@ -217,16 +223,14 @@ def _remove_stale_network_entities(hass: HomeAssistant, entry: PanOSConfigEntry)
                     devices.async_update_device(device.id, remove_config_entry_id=entry.entry_id)
                     break
     lr_keep = {
-        f"{lr_prefix}{lr}_{suffix}"
-        for lr in lrs
-        for suffix in ("egress_ipv4", "egress_ipv6", "routes")
+        f"{lr_prefix}{lr}_{suffix}" for lr in lrs for suffix in ("egress_ipv4", "egress_ipv6", "routes")
     }
     registry = er.async_get(hass)
     for ent in er.async_entries_for_config_entry(registry, entry.entry_id):
         uid = ent.unique_id
-        if uid.startswith(lr_prefix) and prune_lrs and uid not in lr_keep:
-            registry.async_remove(ent.entity_id)
-        elif uid.startswith(prefix) and prune_ifs and uid not in if_keep:
+        stale_lr = uid.startswith(lr_prefix) and prune_lrs and uid not in lr_keep
+        stale_if = uid.startswith(prefix) and prune_ifs and uid not in if_keep
+        if stale_lr or stale_if:
             registry.async_remove(ent.entity_id)
         elif uid.startswith(pm_prefix) and ok.get("path_monitors") and uid not in pm_keep:
             # Path monitor whose next hop no longer exists (e.g. renumbered).

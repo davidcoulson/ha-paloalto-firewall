@@ -46,11 +46,13 @@
         "data": {
           "scan_interval": "Status poll interval",
           "update_check_hours": "Update and licence check interval",
+          "auto_interfaces": "Pick interfaces automatically",
           "interfaces": "Interfaces to monitor"
         },
         "data_description": {
           "update_check_hours": "Each check contacts the Palo Alto update server from both firewalls.",
-          "interfaces": "Link, speed and throughput sensors are created for these. By default, the interfaces used by path monitors and internet routes (your WAN-facing interfaces)."
+          "interfaces": "Link, speed and throughput sensors are created for these. Only used when automatic selection is off.",
+          "auto_interfaces": "On: monitor the WAN-facing interfaces (those used by path monitors and internet routes), following changes on the firewall. Off: monitor exactly the interfaces selected below."
         }
       }
     }

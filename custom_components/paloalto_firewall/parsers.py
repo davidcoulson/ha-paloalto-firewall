@@ -10,7 +10,7 @@ import ipaddress
 import json
 import re
 import xml.etree.ElementTree as ET
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from statistics import mean
 from typing import Any
 
@@ -157,7 +157,7 @@ def parse_ha_state(result: ET.Element) -> dict[str, Any]:
 
 
 def parse_session_info(result: ET.Element) -> dict[str, Any]:
-    data = {
+    data: dict[str, Any] = {
         "num_active": _int(_text(result, "num-active")),
         "num_max": _int(_text(result, "num-max")),
         "num_tcp": _int(_text(result, "num-tcp")),
@@ -206,9 +206,7 @@ def parse_system_resources(result: ET.Element) -> dict[str, Any]:
     if match := _CPU_IDLE_RE.search(text):
         data["mgmt_cpu_pct"] = round(max(0.0, 100.0 - float(match.group(1))), 1)
     if match := _LOAD_RE.search(text):
-        data["load_1m"], data["load_5m"], data["load_15m"] = (
-            float(g) for g in match.groups()
-        )
+        data["load_1m"], data["load_5m"], data["load_15m"] = (float(g) for g in match.groups())
     if match := _MEM_NEW_RE.search(text):
         total = float(match.group(2))
         used = float(match.group(4))
@@ -267,9 +265,9 @@ def parse_dataplane(result: ET.Element) -> dict[str, Any]:
             all_avg.extend(avgs)
         all_max.extend(maxes)
         for entry in minute.findall("resource-utilization/entry"):
-            if (_text(entry, "name") or "").lower() == "packet buffer (average)":
-                if (v := _first_number(_text(entry, "value"))) is not None:
-                    packet_buffer.append(v)
+            is_buffer = (_text(entry, "name") or "").lower() == "packet buffer (average)"
+            if is_buffer and (v := _first_number(_text(entry, "value"))) is not None:
+                packet_buffer.append(v)
     if not all_avg:
         raise ValueError("No dataplane CPU values found")
     return {
@@ -295,9 +293,8 @@ def parse_environmentals(result: ET.Element) -> dict[str, Any]:
             desc = _text(entry, "description") or f"{section} {_text(entry, 'slot', '')}".strip()
             if _yes(_text(entry, "alarm")):
                 alarms.append(f"{section}: {desc}")
-            if section == "thermal":
-                if (deg := _float(_text(entry, "DegreesC"))) is not None:
-                    temps[desc] = round(deg, 1)
+            if section == "thermal" and (deg := _float(_text(entry, "DegreesC"))) is not None:
+                temps[desc] = round(deg, 1)
     if not seen:
         raise ValueError("No environmental data (virtual firewall?)")
     return {
@@ -314,10 +311,7 @@ def parse_environmentals(result: ET.Element) -> dict[str, Any]:
 
 
 def parse_gp_users(result: ET.Element) -> dict[str, Any]:
-    users = [
-        _text(e, "username") or _text(e, "primary-username") or "?"
-        for e in result.findall("entry")
-    ]
+    users = [_text(e, "username") or _text(e, "primary-username") or "?" for e in result.findall("entry")]
     return {"count": len(users), "users": users, "sessions": parse_gp_sessions(result)}
 
 
@@ -327,9 +321,7 @@ def parse_admins(result: ET.Element) -> dict[str, Any]:
 
 
 def parse_ipsec_sa(result: ET.Element) -> dict[str, Any]:
-    names = sorted(
-        {_text(e, "name") or "?" for e in result.findall("entries/entry")}
-    )
+    names = sorted({_text(e, "name") or "?" for e in result.findall("entries/entry")})
     count = _int(_text(result, "ntun"))
     return {"count": count if count is not None else len(names), "tunnels": names}
 
@@ -388,7 +380,7 @@ def _parse_license_date(value: str | None) -> date | None:
 
 
 def parse_licenses(result: ET.Element) -> dict[str, Any]:
-    licenses = []
+    licenses: list[dict[str, Any]] = []
     for e in result.findall("licenses/entry"):
         # The hardware/software warranty is listed alongside subscriptions but
         # is not a licence; its expiry shouldn't raise a problem.
@@ -403,13 +395,13 @@ def parse_licenses(result: ET.Element) -> dict[str, Any]:
                 "expired": _yes(_text(e, "expired")),
             }
         )
-    upcoming = [l for l in licenses if l["expires"] and not l["expired"]]
-    next_expiry = min(upcoming, key=lambda l: l["expires"]) if upcoming else None
+    upcoming = [lic for lic in licenses if lic["expires"] and not lic["expired"]]
+    next_expiry = min(upcoming, key=lambda lic: lic["expires"]) if upcoming else None
     return {
         "licenses": licenses,
         "next_expiry": next_expiry["expires"] if next_expiry else None,
         "next_expiry_feature": next_expiry["feature"] if next_expiry else None,
-        "expired": [l["feature"] for l in licenses if l["expired"]],
+        "expired": [lic["feature"] for lic in licenses if lic["expired"]],
     }
 
 
@@ -439,13 +431,9 @@ def content_version_key(version: str | None) -> tuple[int, ...] | None:
     return tuple(int(n) for n in nums) if nums else None
 
 
-def latest_panos(
-    versions: list[dict[str, Any]], installed: str | None
-) -> dict[str, Any]:
+def latest_panos(versions: list[dict[str, Any]], installed: str | None) -> dict[str, Any]:
     """Pick the newest release in the installed feature train, and overall."""
-    parsed = [
-        (key, v) for v in versions if (key := panos_version_key(v["version"])) is not None
-    ]
+    parsed = [(key, v) for v in versions if (key := panos_version_key(v["version"])) is not None]
     if not parsed:
         return {"train": None, "overall": None}
     overall = max(parsed, key=lambda p: p[0])[1]
@@ -459,9 +447,7 @@ def latest_panos(
 
 
 def latest_content(versions: list[dict[str, Any]]) -> dict[str, Any] | None:
-    parsed = [
-        (key, v) for v in versions if (key := content_version_key(v["version"])) is not None
-    ]
+    parsed = [(key, v) for v in versions if (key := content_version_key(v["version"])) is not None]
     if not parsed:
         return None
     return max(parsed, key=lambda p: p[0])[1]
@@ -537,9 +523,7 @@ def parse_dhcp_leases(result: ET.Element) -> list[dict[str, Any]]:
     return leases
 
 
-def merge_hosts(
-    arp: list[dict[str, Any]], dhcp: list[dict[str, Any]]
-) -> list[dict[str, Any]]:
+def merge_hosts(arp: list[dict[str, Any]], dhcp: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Combine ARP entries and DHCP leases describing the same IP+MAC."""
     hosts: dict[tuple[str, str], dict[str, Any]] = {}
     for source, records in (("dhcp", dhcp), ("arp", arp)):
@@ -576,10 +560,7 @@ def host_matches(host: dict[str, Any], query: str) -> bool:
         pass
     if _MAC_QUERY.match(q) and host.get("mac") and normalize_mac(q) in normalize_mac(host["mac"]):
         return True
-    return any(
-        q in str(host.get(field) or "").lower()
-        for field in ("ip", "mac", "hostname", "interface")
-    )
+    return any(q in str(host.get(field) or "").lower() for field in ("ip", "mac", "hostname", "interface"))
 
 
 # --------------------------------------------------------------------------
@@ -678,8 +659,16 @@ def parse_interfaces(result: ET.Element) -> dict[str, dict[str, Any]]:
     for name, data in hw.items():
         interfaces.setdefault(
             name,
-            {"name": name, "vsys": None, "zone": None, "logical_router": None,
-             "forwarding": None, "tag": 0, "ips": [], **data},
+            {
+                "name": name,
+                "vsys": None,
+                "zone": None,
+                "logical_router": None,
+                "forwarding": None,
+                "tag": 0,
+                "ips": [],
+                **data,
+            },
         )
     return interfaces
 
@@ -696,8 +685,7 @@ def parse_interface_counters(result: ET.Element) -> dict[str, Any]:
     if entry is None:
         raise ValueError("No counter entry in interface response")
     return {
-        k: _int(_text(entry, k))
-        for k in ("ibytes", "obytes", "ipackets", "opackets", "ierrors", "idrops")
+        k: _int(_text(entry, k)) for k in ("ibytes", "obytes", "ipackets", "opackets", "ierrors", "idrops")
     }
 
 
@@ -729,9 +717,7 @@ def parse_fib(result: ET.Element) -> list[dict[str, Any]]:
     return routes
 
 
-def fib_lookup(
-    routes: list[dict[str, Any]], logical_router: str, address: str
-) -> list[dict[str, Any]]:
+def fib_lookup(routes: list[dict[str, Any]], logical_router: str, address: str) -> list[dict[str, Any]]:
     """Longest-prefix match in one logical router's FIB (all ECMP paths)."""
     ip = ipaddress.ip_address(address)
     best: list[dict[str, Any]] = []
@@ -789,7 +775,7 @@ def _job_time(value: str | None) -> datetime | None:
 
 
 def parse_jobs(result: ET.Element) -> dict[str, Any]:
-    jobs = []
+    jobs: list[dict[str, Any]] = []
     for e in result.findall("job"):
         jobs.append(
             {
@@ -806,7 +792,8 @@ def parse_jobs(result: ET.Element) -> dict[str, Any]:
         )
     running = [j for j in jobs if j["status"] in ("ACT", "PEND")]
     commits = [
-        j for j in jobs
+        j
+        for j in jobs
         if (j["type"] or "").lower() in ("commit", "commitall", "commit-all") and j["status"] == "FIN"
     ]
     last_commit = max(commits, key=lambda j: j["id"] or 0) if commits else None
@@ -923,9 +910,7 @@ def parse_pd_pools(result: ET.Element) -> dict[str, dict[str, Any]]:
     return pools
 
 
-def nptv6_mismatches(
-    rules: dict[str, dict[str, Any]], pool: dict[str, Any]
-) -> tuple[list[str], list[str]]:
+def nptv6_mismatches(rules: dict[str, dict[str, Any]], pool: dict[str, Any]) -> tuple[list[str], list[str]]:
     """NPTv6 rules for this pool's WAN that don't fit the delegated prefix.
 
     A rule belongs to the pool's WAN when its to-interface is the pool's
@@ -959,10 +944,8 @@ def nptv6_mismatches(
             public = ipaddress.ip_network(info["public"], strict=False)
         except (TypeError, ValueError):
             continue
-        if public.version == delegated.version and not public.subnet_of(delegated):
-            problems.append(
-                f"{name}: {info['direction']} uses {public}, outside delegated {delegated}"
-            )
+        if public.version == delegated.version and not public.subnet_of(delegated):  # type: ignore[arg-type]
+            problems.append(f"{name}: {info['direction']} uses {public}, outside delegated {delegated}")
     return problems, checked
 
 
@@ -1061,10 +1044,9 @@ def parse_sessions(result: ET.Element) -> list[dict[str, Any]]:
     for e in result.findall("entry"):
         s: dict[str, Any] = {}
         for tag, key in _SESSION_FIELDS.items():
-            value = _text(e, tag)
-            if key in ("id", "source_port", "destination_port", "protocol", "bytes"):
-                value = _int(value)
-            s[key] = value
+            text = _text(e, tag)
+            numeric = key in ("id", "source_port", "destination_port", "protocol", "bytes")
+            s[key] = _int(text) if numeric else text
         if _yes_bool(_text(e, "srcnat")):
             s["nat_source"] = f"{_text(e, 'xsource')}:{_text(e, 'xsport')}"
         if _yes_bool(_text(e, "dstnat")):
@@ -1108,10 +1090,9 @@ def _epoch_iso(value: str | None) -> str | None:
     ts = _int(value)
     if not ts:
         return None
-    from datetime import timezone
 
     try:
-        return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+        return datetime.fromtimestamp(ts, tz=UTC).isoformat()
     except (OverflowError, OSError, ValueError):
         return None
 
@@ -1202,12 +1183,11 @@ def _asn1_time(value: str | None) -> datetime | None:
     match = _ASN1_TIME.match(value.strip())
     if not match:
         return None
-    from datetime import timezone
 
     raw = match.group(1)
     year = int(raw[:2])
     year += 2000 if year < 50 else 1900
-    return datetime.strptime(f"{year}{raw[2:]}", "%Y%m%d%H%M%S").replace(tzinfo=timezone.utc)
+    return datetime.strptime(f"{year}{raw[2:]}", "%Y%m%d%H%M%S").replace(tzinfo=UTC)
 
 
 def _cn(dn: str | None) -> str | None:

@@ -29,23 +29,17 @@ CMD_HA_STATE = "<show><high-availability><state></state></high-availability></sh
 CMD_SESSION_INFO = "<show><session><info></info></session></show>"
 CMD_SYSTEM_RESOURCES = "<show><system><resources></resources></system></show>"
 CMD_DATAPLANE = (
-    "<show><running><resource-monitor><minute><last>1</last></minute>"
-    "</resource-monitor></running></show>"
+    "<show><running><resource-monitor><minute><last>1</last></minute></resource-monitor></running></show>"
 )
 CMD_ENVIRONMENTALS = "<show><system><environmentals></environmentals></system></show>"
-CMD_GP_USERS = (
-    "<show><global-protect-gateway><current-user></current-user>"
-    "</global-protect-gateway></show>"
-)
+CMD_GP_USERS = "<show><global-protect-gateway><current-user></current-user></global-protect-gateway></show>"
 CMD_ADMINS = "<show><admins></admins></show>"
 CMD_IPSEC_SA = "<show><vpn><ipsec-sa></ipsec-sa></vpn></show>"
 CMD_SOFTWARE_CHECK = "<request><system><software><check></check></software></system></request>"
 CMD_CONTENT_CHECK = "<request><content><upgrade><check></check></upgrade></content></request>"
 CMD_LICENSE_INFO = "<request><license><info></info></license></request>"
 CMD_ARP_ALL = "<show><arp><entry name='all'/></arp></show>"
-CMD_DHCP_LEASES = (
-    "<show><dhcp><server><lease><interface>all</interface></lease></server></dhcp></show>"
-)
+CMD_DHCP_LEASES = "<show><dhcp><server><lease><interface>all</interface></lease></server></dhcp></show>"
 
 CMD_INTERFACE_ALL = "<show><interface>all</interface></show>"
 CMD_FIB = "<show><advanced-routing><fib></fib></advanced-routing></show>"
@@ -57,16 +51,12 @@ CMD_JOBS = "<show><jobs><all></all></jobs></show>"
 CMD_PENDING_CHANGES = "<check><pending-changes></pending-changes></check>"
 CMD_PD_POOLS = "<show><dhcp><client><ipv6><pool-details>all</pool-details></ipv6></client></dhcp></show>"
 CMD_GP_PREVIOUS = (
-    "<show><global-protect-gateway><previous-user></previous-user>"
-    "</global-protect-gateway></show>"
+    "<show><global-protect-gateway><previous-user></previous-user></global-protect-gateway></show>"
 )
 CMD_GP_CLIENT_CHECK = (
-    "<request><global-protect-client><software><check></check></software>"
-    "</global-protect-client></request>"
+    "<request><global-protect-client><software><check></check></software></global-protect-client></request>"
 )
-CMD_CERTS_DEVICE = (
-    "<show><sslmgr-store><config-ca-certificate></config-ca-certificate></sslmgr-store></show>"
-)
+CMD_CERTS_DEVICE = "<show><sslmgr-store><config-ca-certificate></config-ca-certificate></sslmgr-store></show>"
 CMD_CERTS_STORE = (
     "<show><sslmgr-store><config-certificate-info></config-certificate-info></sslmgr-store></show>"
 )
@@ -80,6 +70,7 @@ CMD_BGP_PEERS_LR = (
 )
 
 CONF_INTERFACES = "interfaces"
+CONF_AUTO_INTERFACES = "auto_interfaces"
 EVENT_EGRESS_CHANGE = f"{DOMAIN}_egress_change"
 EVENT_PREFIX_CHANGE = f"{DOMAIN}_prefix_change"
 EVENT_BGP_PEER_CHANGE = f"{DOMAIN}_bgp_peer_change"

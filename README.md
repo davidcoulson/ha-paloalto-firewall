@@ -119,7 +119,7 @@ actions:
 
 **On the pair device:**
 
-- Interface **link**, **link speed**, and **in/out throughput** for the interfaces chosen in *Configure* (by default, the interfaces used by path monitors and internet routes)
+- Interface **link**, **link speed**, and **in/out throughput** for the interfaces chosen in *Configure*. With *Pick interfaces automatically* on (the default) that's the interfaces used by path monitors and internet routes, re-evaluated as routing changes; turn it off to choose a fixed list
 - **Uncommitted changes**, **Running jobs**, and **Last commit** (from the firewall's job history; unknown once it ages out)
 
 ### IPv6 delegated prefixes and NPTv6

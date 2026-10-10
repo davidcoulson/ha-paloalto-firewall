@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta, timezone
+from functools import partial
 from typing import Any
 
 from homeassistant.components.sensor import (
@@ -22,12 +23,16 @@ from homeassistant.util import dt as dt_util
 from .const import DOMAIN
 from .coordinator import PanOSConfigEntry
 from .entity import PanOSNetworkEntity, PanOSPairEntity, PanOSUnitEntity, PanOSUpdatesEntity
-from .network import lr_device_info, safe_key
+from .network import cert_uid_suffix, lr_device_info, migrate_unique_id, safe_key
 from .parsers import HA_STATES
 
 Data = dict[str, Any]
 
 BRAND_ICON = f"/api/brands/integration/{DOMAIN}/icon.png"
+
+
+def _system_value(key: str, data: Data | None) -> Any:
+    return _get(data, "system", key)
 
 
 def _get(data: Data | None, section: str, key: str) -> Any:
@@ -271,7 +276,7 @@ UNIT_SENSORS: tuple[PanOSSensorDescription, ...] = (
             entity_category=EntityCategory.DIAGNOSTIC,
             entity_registry_enabled_default=enabled,
             brand_picture=key == "app_version",
-            value_fn=lambda d, k=key: _get(d, "system", k),
+            value_fn=partial(_system_value, key),
         )
         for key, name, icon, enabled in (
             ("sw_version", "PAN-OS version", "mdi:package-variant-closed", True),
@@ -302,9 +307,7 @@ LICENSE_SENSOR = PanOSSensorDescription(
     value_fn=_license_expiry,
     attrs_fn=lambda d: {
         "feature": _get(d, "licenses", "next_expiry_feature"),
-        "licences": {
-            l["feature"]: l["expires_raw"] for l in (_get(d, "licenses", "licenses") or [])
-        },
+        "licences": {lic["feature"]: lic["expires_raw"] for lic in (_get(d, "licenses", "licenses") or [])},
     },
 )
 
@@ -330,40 +333,42 @@ async def async_setup_entry(
     for unit in runtime.units:
         first = unit.coordinator.data
         entities.extend(
-            PanOSUnitSensor(entry, unit, desc)
-            for desc in UNIT_SENSORS
-            if desc.exists_fn(first, paired)
+            PanOSUnitSensor(entry, unit, desc) for desc in UNIT_SENSORS if desc.exists_fn(first, paired)
         )
         entities.append(PanOSLicenseSensor(entry, unit, LICENSE_SENSOR))
     if runtime.pair:
         entities.append(PanOSActiveUnitSensor(entry, runtime.pair, PAIR_ACTIVE_SENSOR))
         entities.append(PanOSLastFailoverSensor(entry, runtime.pair, PAIR_FAILOVER_SENSOR))
         entities.extend(
-            PanOSPairMirrorSensor(entry, runtime.pair, desc)
-            for desc in UNIT_SENSORS
-            if desc.on_pair
+            PanOSPairMirrorSensor(entry, runtime.pair, desc) for desc in UNIT_SENSORS if desc.on_pair
         )
     async_add_entities(entities)
     _track_network_entities(entry, async_add_entities)
     _track_certificates(entry, async_add_entities)
 
 
-def _track_certificates(
-    entry: PanOSConfigEntry, async_add_entities: AddConfigEntryEntitiesCallback
-) -> None:
+def _track_certificates(entry: PanOSConfigEntry, async_add_entities: AddConfigEntryEntitiesCallback) -> None:
     """An expiry sensor per firewall-owned certificate (those with a private key)."""
     network = entry.runtime_data.network
     if network is None:
         return
-    added: set[str] = set()
+    added: set[tuple[str, Any]] = set()
 
     @callback
     def _add_new() -> None:
         certs = ((network.data or {}).get("certificates") or {}).get("device") or []
-        new = sorted({c["name"] for c in certs} - added)
+        new = sorted({(c["name"], c.get("vsys")) for c in certs} - added, key=str)
         if new:
             added.update(new)
-            async_add_entities(PanOSCertificateSensor(entry, n) for n in new)
+            for name, vsys in new:
+                # Earlier versions keyed certificates by name only.
+                migrate_unique_id(
+                    network.hass,
+                    "sensor",
+                    f"{entry.entry_id}_cert_{safe_key(name)}",
+                    f"{entry.entry_id}_{cert_uid_suffix(name, vsys)}",
+                )
+            async_add_entities(PanOSCertificateSensor(entry, n, v) for n, v in new)
 
     _add_new()
     entry.async_on_unload(network.async_add_listener(_add_new))
@@ -543,9 +548,7 @@ class PanOSLastCommitSensor(PanOSNetworkEntity, SensorEntity):
             # Job times are the firewall's local time, which may differ from HA's.
             offset = self.data.get("utc_offset_minutes")
             when = when.replace(
-                tzinfo=dt_util.DEFAULT_TIME_ZONE
-                if offset is None
-                else timezone(timedelta(minutes=offset))
+                tzinfo=dt_util.DEFAULT_TIME_ZONE if offset is None else timezone(timedelta(minutes=offset))
             )
             if self._last is None or when >= self._last[0]:
                 self._last = (when, jobs["last_commit"])
@@ -756,14 +759,16 @@ class PanOSCertificateSensor(PanOSNetworkEntity, SensorEntity):
     _attr_device_class = SensorDeviceClass.TIMESTAMP
     _attr_icon = "mdi:certificate"
 
-    def __init__(self, entry: PanOSConfigEntry, name: str) -> None:
-        super().__init__(entry, f"cert_{safe_key(name)}")
+    def __init__(self, entry: PanOSConfigEntry, name: str, vsys: Any = None) -> None:
+        super().__init__(entry, cert_uid_suffix(name, vsys))
         self._name = name
-        self._attr_name = f"Certificate {name}"
+        self._vsys = vsys
+        # vsys 0 is the shared store; name the vsys only for vsys-local certs.
+        self._attr_name = f"Certificate {name}" + (f" (vsys{vsys})" if vsys else "")
 
     def _cert(self) -> dict[str, Any] | None:
         certs = (self.data.get("certificates") or {}).get("device") or []
-        return next((c for c in certs if c["name"] == self._name), None)
+        return next((c for c in certs if c["name"] == self._name and c.get("vsys") == self._vsys), None)
 
     @property
     def available(self) -> bool:
@@ -783,9 +788,7 @@ class PanOSCertificateSensor(PanOSNetworkEntity, SensorEntity):
             "issuer": cert.get("issuer"),
             "san": cert.get("san"),
             "not_before": cert.get("not_before"),
-            "days_left": int((expires - dt_util.utcnow()).total_seconds() // 86400)
-            if expires
-            else None,
+            "days_left": int((expires - dt_util.utcnow()).total_seconds() // 86400) if expires else None,
             "self_signed": cert.get("self_signed"),
             "chain_length": cert.get("chain_length"),
             "vsys": cert.get("vsys"),
@@ -811,7 +814,7 @@ def _track_network_entities(
             return
         new = [e for e in network_sensors(entry) if e.unique_id not in added]
         if new:
-            added.update(e.unique_id for e in new)
+            added.update(str(e.unique_id) for e in new)
             async_add_entities(new)
 
     _sync()

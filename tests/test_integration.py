@@ -19,7 +19,6 @@ from custom_components.paloalto_firewall.const import (
     DOMAIN,
     EVENT_FAILOVER,
 )
-
 from custom_components.paloalto_firewall.devices import get_device
 
 from .fakefw import FakePair
@@ -47,8 +46,9 @@ def fake(monkeypatch):
     return f
 
 
-async def _setup(hass: HomeAssistant, fake) -> MockConfigEntry:
+async def _setup(hass: HomeAssistant, fake, **kwargs) -> MockConfigEntry:
     entry = MockConfigEntry(
+        **kwargs,
         domain=DOMAIN,
         title="Edge",
         unique_id="0123456789001_0123456789002",
@@ -164,7 +164,10 @@ async def test_auth_failure_starts_reauth(hass: HomeAssistant, fake) -> None:
     entry = MockConfigEntry(
         domain=DOMAIN,
         data={
-            CONF_NAME: "Edge", CONF_USERNAME: "u", CONF_PASSWORD: "p", CONF_VERIFY_SSL: False,
+            CONF_NAME: "Edge",
+            CONF_USERNAME: "u",
+            CONF_PASSWORD: "p",
+            CONF_VERIFY_SSL: False,
             CONF_UNITS: [{"host": "fw1.lan", "serial": "0123456789001", "hostname": "fw1", "model": None}],
         },
     )
@@ -233,8 +236,11 @@ async def test_lookup_action(hass: HomeAssistant, fake) -> None:
     assert {h for h, _ in fake.calls} == {"fw2.lan"}
 
     result = await hass.services.async_call(
-        DOMAIN, "lookup", {"query": "garage", "source": "dhcp", "config_entry_id": entry.entry_id},
-        blocking=True, return_response=True,
+        DOMAIN,
+        "lookup",
+        {"query": "garage", "source": "dhcp", "config_entry_id": entry.entry_id},
+        blocking=True,
+        return_response=True,
     )
     assert [m["ip"] for m in result["matches"]] == ["10.2.3.99"]
     assert result["matches"][0]["sources"] == ["dhcp"]
@@ -248,10 +254,9 @@ async def test_lookup_action(hass: HomeAssistant, fake) -> None:
 
     fake.units["fw1.lan"]["up"] = False
     from homeassistant.exceptions import HomeAssistantError
+
     with pytest.raises(HomeAssistantError):
-        await hass.services.async_call(
-            DOMAIN, "lookup", {"query": "x"}, blocking=True, return_response=True
-        )
+        await hass.services.async_call(DOMAIN, "lookup", {"query": "x"}, blocking=True, return_response=True)
 
 
 async def test_lookup_requires_loaded_entry(hass: HomeAssistant, fake) -> None:
@@ -260,9 +265,7 @@ async def test_lookup_requires_loaded_entry(hass: HomeAssistant, fake) -> None:
 
     assert await async_setup_component(hass, DOMAIN, {})
     with pytest.raises(ServiceValidationError):
-        await hass.services.async_call(
-            DOMAIN, "lookup", {"query": "x"}, blocking=True, return_response=True
-        )
+        await hass.services.async_call(DOMAIN, "lookup", {"query": "x"}, blocking=True, return_response=True)
 
 
 async def test_security_policy_action(hass: HomeAssistant, fake) -> None:
@@ -271,10 +274,18 @@ async def test_security_policy_action(hass: HomeAssistant, fake) -> None:
     await _setup(hass, fake)
     fake.calls.clear()
     result = await hass.services.async_call(
-        DOMAIN, "test_security_policy",
-        {"source": "10.2.4.86", "destination": "1.1.1.1", "destination_port": 443,
-         "protocol": "tcp", "from_zone": "iot", "to_zone": "untrust"},
-        blocking=True, return_response=True,
+        DOMAIN,
+        "test_security_policy",
+        {
+            "source": "10.2.4.86",
+            "destination": "1.1.1.1",
+            "destination_port": 443,
+            "protocol": "tcp",
+            "from_zone": "iot",
+            "to_zone": "untrust",
+        },
+        blocking=True,
+        return_response=True,
     )
     assert result["firewall"] == "fw1"  # the active unit
     assert result["mode"] == "explicit"
@@ -284,16 +295,21 @@ async def test_security_policy_action(hass: HomeAssistant, fake) -> None:
     assert {h for h, _ in fake.calls} == {"fw1.lan"}
 
     result = await hass.services.async_call(
-        DOMAIN, "test_security_policy", {"source": "10.2.4.86", "destination": "9.9.9.9"},
-        blocking=True, return_response=True,
+        DOMAIN,
+        "test_security_policy",
+        {"source": "10.2.4.86", "destination": "9.9.9.9"},
+        blocking=True,
+        return_response=True,
     )
     assert result["hops"][-1]["matched"] is False and "note" in result
 
     with pytest.raises(HomeAssistantError, match="bogus"):
         await hass.services.async_call(
-            DOMAIN, "test_security_policy",
+            DOMAIN,
+            "test_security_policy",
             {"source": "10.2.4.86", "destination": "1.1.1.1", "from_zone": "bogus"},
-            blocking=True, return_response=True,
+            blocking=True,
+            return_response=True,
         )
 
 
@@ -340,11 +356,18 @@ async def test_network_entities_and_egress_change(hass: HomeAssistant, fake) -> 
     assert st("binary_sensor.wan_b_vr_path_monitor_ethernet1_2_via_203_0_113_1").state == "off"
     assert st("binary_sensor.edge_ha_pair_ethernet1_2_link").state == "off"
     ev = [e.data for e in events if e.data["logical_router"] == "core-vr"]
-    assert ev == [{
-        "entry_id": entry.entry_id, "logical_router": "core-vr", "family": "ipv4",
-        "previous_interface": "ae9.101", "previous_zone": "WanB",
-        "interface": "ae9.100", "zone": "WanA", "nexthop": "172.31.0.2",
-    }]
+    assert ev == [
+        {
+            "entry_id": entry.entry_id,
+            "logical_router": "core-vr",
+            "family": "ipv4",
+            "previous_interface": "ae9.101",
+            "previous_zone": "WanB",
+            "interface": "ae9.100",
+            "zone": "WanA",
+            "nexthop": "172.31.0.2",
+        }
+    ]
 
 
 async def test_route_lookup_and_inferred_policy_tests(hass: HomeAssistant, fake) -> None:
@@ -358,12 +381,21 @@ async def test_route_lookup_and_inferred_policy_tests(hass: HomeAssistant, fake)
     r = await call("route_lookup", {"destination": "1.1.1.1"})
     assert [x["logical_router"] for x in r["results"]] == ["core-vr", "wan-a-vr", "wan-b-vr"]
     assert r["results"][0]["paths"][0] == {
-        "interface": "ae9.101", "nexthop": "172.31.0.6", "zone": "WanB", "vsys": "vsys1", "drop": False
+        "interface": "ae9.101",
+        "nexthop": "172.31.0.6",
+        "zone": "WanB",
+        "vsys": "vsys1",
+        "drop": False,
     }
     r = await call("route_lookup", {"destination": "10.9.99.9", "source": "10.9.20.50"})
     assert r["searched"].startswith("source 10.9.20.50 (ae1.20)")
-    assert r["results"] == [{"logical_router": "core-vr", "route": "10.9.0.0/16",
-                             "paths": [{"interface": None, "nexthop": "drop", "zone": None, "vsys": None, "drop": True}]}]
+    assert r["results"] == [
+        {
+            "logical_router": "core-vr",
+            "route": "10.9.0.0/16",
+            "paths": [{"interface": None, "nexthop": "drop", "zone": None, "vsys": None, "drop": True}],
+        }
+    ]
     r = await call("route_lookup", {"destination": "1.1.1.1", "logical_router": "wan-a-vr"})
     assert r["results"][0]["paths"][0]["interface"] == "ethernet1/1"
     with pytest.raises(ServiceValidationError):
@@ -371,7 +403,9 @@ async def test_route_lookup_and_inferred_policy_tests(hass: HomeAssistant, fake)
 
     # Traced: IoT (vsys1, core-vr) -> WanB, then re-enters on ae9.201 (vsys3, wan-b-vr) -> Internet.
     fake.vsys_calls.clear()
-    r = await call("test_security_policy", {"source": "10.9.20.50", "destination": "1.1.1.1", "destination_port": 443})
+    r = await call(
+        "test_security_policy", {"source": "10.9.20.50", "destination": "1.1.1.1", "destination_port": 443}
+    )
     assert r["mode"] == "traced"
     assert [(h["vsys"], h["from_zone"], h["to_zone"], h["egress_interface"]) for h in r["hops"]] == [
         ("vsys1", "IoT", "WanB", "ae9.101"),
@@ -395,23 +429,36 @@ async def test_route_lookup_and_inferred_policy_tests(hass: HomeAssistant, fake)
 
     # Explicit vsys: one hop, gaps filled from the matching traced hop.
     fake.vsys_calls.clear()
-    r = await call("test_security_policy", {"source": "10.9.20.50", "destination": "1.1.1.1", "vsys": "vsys3"})
+    r = await call(
+        "test_security_policy", {"source": "10.9.20.50", "destination": "1.1.1.1", "vsys": "vsys3"}
+    )
     assert r["mode"] == "explicit" and len(r["hops"]) == 1
     assert (r["hops"][0]["from_zone"], r["hops"][0]["to_zone"]) == ("Core", "Internet")
     assert fake.vsys_calls == [(fake.vsys_calls[0][0], "vsys3")]
 
     # Explicit zones win.
-    r = await call("test_security_policy", {"source": "10.9.20.50", "destination": "1.1.1.1",
-                                            "from_zone": "Trusted", "to_zone": "WanA", "vsys": "vsys1"})
+    r = await call(
+        "test_security_policy",
+        {
+            "source": "10.9.20.50",
+            "destination": "1.1.1.1",
+            "from_zone": "Trusted",
+            "to_zone": "WanA",
+            "vsys": "vsys1",
+        },
+    )
     assert "<from>Trusted</from><to>WanA</to>" in fake.vsys_calls[-1][0]
 
     # NAT: tested at every hop with that hop's egress interface.
     fake.vsys_calls.clear()
-    r = await call("test_nat_policy", {"source": "10.9.20.50", "destination": "1.1.1.1", "destination_port": 443})
+    r = await call(
+        "test_nat_policy", {"source": "10.9.20.50", "destination": "1.1.1.1", "destination_port": 443}
+    )
     assert [h["egress_interface"] for h in r["hops"]] == ["ae9.101", "ethernet1/2"]
     assert "<to-interface>ethernet1/2</to-interface>" in fake.vsys_calls[1][0]
     assert [(t["hop"], t["vsys"], t["rule"]) for t in r["translations"]] == [
-        (1, "vsys1", "IoT-Hide-NAT"), (2, "vsys3", "IoT-Hide-NAT"),
+        (1, "vsys1", "IoT-Hide-NAT"),
+        (2, "vsys3", "IoT-Hide-NAT"),
     ]
     # Hop 2's rule exists in vsys3's running NAT, so its translation is reported.
     assert r["translations"][1]["translate_to"].startswith("src: ethernet1/2 203.0.113.10")
@@ -425,7 +472,10 @@ async def test_standalone_network_entities(hass: HomeAssistant, fake) -> None:
     entry = MockConfigEntry(
         domain=DOMAIN,
         data={
-            CONF_NAME: "Edge", CONF_USERNAME: "u", CONF_PASSWORD: "p", CONF_VERIFY_SSL: False,
+            CONF_NAME: "Edge",
+            CONF_USERNAME: "u",
+            CONF_PASSWORD: "p",
+            CONF_VERIFY_SSL: False,
             CONF_UNITS: [{"host": "fw1.lan", "serial": "0123456789001", "hostname": "fw1", "model": None}],
         },
     )
@@ -446,13 +496,15 @@ async def test_options_interface_selection(hass: HomeAssistant, fake) -> None:
     schema_keys = [str(k) for k in result["data_schema"].schema]
     assert "interfaces" in schema_keys
     result = await hass.config_entries.options.async_configure(
-        result["flow_id"], {"scan_interval": 60, "update_check_hours": 6, "interfaces": ["ae1.20"]}
+        result["flow_id"],
+        {"scan_interval": 60, "update_check_hours": 6, "auto_interfaces": False, "interfaces": ["ae1.20"]},
     )
     await hass.async_block_till_done(wait_background_tasks=True)
     assert entry.options["interfaces"] == ["ae1.20"]
     assert hass.states.get("sensor.edge_ha_pair_ae1_20_in") is not None
     assert hass.states.get("binary_sensor.edge_ha_pair_ae1_20_link").state == "on"
     from homeassistant.helpers import entity_registry as er
+
     assert er.async_get(hass).async_get("sensor.edge_ha_pair_ethernet1_1_in") is None
 
 
@@ -480,10 +532,15 @@ async def test_prefix_pools_and_npt_mismatch(hass: HomeAssistant, fake, freezer)
     assert events == []
     assert st("sensor.edge_ha_pair_wan_b_delegated_prefix").state == "2001:db8:b00::/56"
     await _tick(hass, freezer, 240)
-    assert [e.data for e in events] == [{
-        "entry_id": entry.entry_id, "pool": "wan-b", "interface": "ethernet1/2",
-        "previous_prefix": "2001:db8:b00::/56", "prefix": "2001:db8:c00::/56",
-    }]
+    assert [e.data for e in events] == [
+        {
+            "entry_id": entry.entry_id,
+            "pool": "wan-b",
+            "interface": "ethernet1/2",
+            "previous_prefix": "2001:db8:b00::/56",
+            "prefix": "2001:db8:c00::/56",
+        }
+    ]
     assert st("binary_sensor.edge_ha_pair_wan_b_nptv6_prefix_mismatch").state == "on"
 
 
@@ -493,7 +550,9 @@ async def test_stale_path_monitor_entities_removed(hass: HomeAssistant, fake) ->
     entry = await _setup(hass, fake)
     reg = er.async_get(hass)
     stale = reg.async_get_or_create(
-        "binary_sensor", DOMAIN, f"{entry.entry_id}_pm_core-vr_ae9_100_fd00_99_old__1",
+        "binary_sensor",
+        DOMAIN,
+        f"{entry.entry_id}_pm_core-vr_ae9_100_fd00_99_old__1",
         config_entry=entry,
     )
     keep = "binary_sensor.wan_b_vr_path_monitor_ethernet1_2_via_203_0_113_1"
@@ -530,7 +589,9 @@ async def test_bgp_peers(hass: HomeAssistant, fake, freezer) -> None:
 
     # A peer that disappears from the config is cleaned up on reload.
     reg = er.async_get(hass)
-    stale = reg.async_get_or_create("binary_sensor", DOMAIN, f"{entry.entry_id}_bgp_core_vr_old_peer", config_entry=entry)
+    stale = reg.async_get_or_create(
+        "binary_sensor", DOMAIN, f"{entry.entry_id}_bgp_core_vr_old_peer", config_entry=entry
+    )
     assert await hass.config_entries.async_reload(entry.entry_id)
     await hass.async_block_till_done(wait_background_tasks=True)
     assert reg.async_get(stale.entity_id) is None
@@ -661,16 +722,20 @@ async def test_session_lookup(hass: HomeAssistant, fake) -> None:
 
     await _setup(hass, fake)
     resp = await hass.services.async_call(
-        DOMAIN, "session_lookup",
+        DOMAIN,
+        "session_lookup",
         {"source": "10.2.4.86", "destination_port": 443, "protocol": "tcp", "limit": 1},
-        blocking=True, return_response=True,
+        blocking=True,
+        return_response=True,
     )
     assert resp["firewall"] == "fw1" and resp["total"] == 2
     assert resp["returned"] == 1 and resp["truncated"] is True
     s = resp["sessions"][0]
     assert s["application"] == "ssl" and s["rule"] == "Allow web"
     assert s["nat_source"] == "203.0.113.10:40001" and "nat_destination" not in s
-    cmd = next(c for _, c in reversed(fake.calls) if c.startswith("<show><session><all>") and "count" not in c)
+    cmd = next(
+        c for _, c in reversed(fake.calls) if c.startswith("<show><session><all>") and "count" not in c
+    )
     assert "<source>10.2.4.86</source><destination-port>443</destination-port><protocol>6</protocol>" in cmd
 
     detail = await hass.services.async_call(
@@ -698,9 +763,7 @@ async def test_permission_denied_command_is_not_reauth(hass: HomeAssistant, fake
     assert entry.state is config_entries.ConfigEntryState.LOADED
 
 
-async def test_transient_failures_keep_entities_and_stay_quiet(
-    hass: HomeAssistant, fake, freezer
-) -> None:
+async def test_transient_failures_keep_entities_and_stay_quiet(hass: HomeAssistant, fake, freezer) -> None:
     from homeassistant.helpers import entity_registry as er
 
     from custom_components.paloalto_firewall import const
@@ -741,9 +804,7 @@ async def test_transient_failures_keep_entities_and_stay_quiet(
     assert egress == [] and gp_off == [] and bgp == []
 
 
-async def test_network_entities_appear_after_late_first_poll(
-    hass: HomeAssistant, fake, freezer
-) -> None:
+async def test_network_entities_appear_after_late_first_poll(hass: HomeAssistant, fake, freezer) -> None:
     from custom_components.paloalto_firewall import const
 
     fake.fail = {const.CMD_INTERFACE_ALL: "error"}
@@ -757,15 +818,42 @@ async def test_network_entities_appear_after_late_first_poll(
 
 async def test_options_keep_automatic_interfaces(hass: HomeAssistant, fake) -> None:
     entry = await _setup(hass, fake)
-    network = entry.runtime_data.network
-    auto = network.auto_interfaces(network.data)
     result = await hass.config_entries.options.async_init(entry.entry_id)
+    defaults = {str(k): k.default() for k in result["data_schema"].schema if "auto" in str(k)}
+    assert defaults == {"auto_interfaces": True}
+    network = entry.runtime_data.network
     result = await hass.config_entries.options.async_configure(
-        result["flow_id"], {"scan_interval": 30, "update_check_hours": 6, "interfaces": list(auto)}
+        result["flow_id"],
+        {
+            "scan_interval": 30,
+            "update_check_hours": 6,
+            "auto_interfaces": True,
+            "interfaces": list(network.selected_interfaces(network.data)),
+        },
     )
     await hass.async_block_till_done(wait_background_tasks=True)
     assert "interfaces" not in entry.options
     assert entry.options["scan_interval"] == 30
+
+
+async def test_options_switch_manual_then_back_to_automatic(hass: HomeAssistant, fake) -> None:
+    entry = await _setup(hass, fake)
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"],
+        {"scan_interval": 60, "update_check_hours": 6, "auto_interfaces": False, "interfaces": ["ae1.20"]},
+    )
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert entry.options["interfaces"] == ["ae1.20"]
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    defaults = {str(k): k.default() for k in result["data_schema"].schema if "auto" in str(k)}
+    assert defaults == {"auto_interfaces": False}
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"],
+        {"scan_interval": 60, "update_check_hours": 6, "auto_interfaces": True, "interfaces": ["ae1.20"]},
+    )
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert "interfaces" not in entry.options
 
 
 async def test_subinterface_entities_cleaned_up_exactly(hass: HomeAssistant, fake) -> None:
@@ -818,11 +906,18 @@ async def test_removed_logical_router_cleaned_up(hass: HomeAssistant, fake) -> N
     reg = er.async_get(hass)
     pair = get_device(devices, (DOMAIN, pair_identifier(entry.entry_id)), entry.entry_id)
     gone = ensure_device(
-        hass, entry, (DOMAIN, lr_identifier(entry.entry_id, "old-vr")), pair, name="old-vr",
+        hass,
+        entry,
+        (DOMAIN, lr_identifier(entry.entry_id, "old-vr")),
+        pair,
+        name="old-vr",
     )
     stale = reg.async_get_or_create(
-        "sensor", DOMAIN, f"{entry.entry_id}_lr_old-vr_egress_ipv4",
-        config_entry=entry, device_id=gone.id,
+        "sensor",
+        DOMAIN,
+        f"{entry.entry_id}_lr_old-vr_egress_ipv4",
+        config_entry=entry,
+        device_id=gone.id,
     )
     assert await hass.config_entries.async_reload(entry.entry_id)
     await hass.async_block_till_done(wait_background_tasks=True)
@@ -852,9 +947,7 @@ async def test_failover_does_not_fire_bgp_change(hass: HomeAssistant, fake, free
 async def test_new_entries_verify_tls_by_default(hass: HomeAssistant, fake) -> None:
     from homeassistant.const import CONF_VERIFY_SSL as KEY
 
-    result = await hass.config_entries.flow.async_init(
-        DOMAIN, context={"source": config_entries.SOURCE_USER}
-    )
+    result = await hass.config_entries.flow.async_init(DOMAIN, context={"source": config_entries.SOURCE_USER})
     import voluptuous as vol
 
     defaults = {
@@ -867,10 +960,48 @@ async def test_new_entries_verify_tls_by_default(hass: HomeAssistant, fake) -> N
 
 async def test_config_flow_explains_tls_failure(hass: HomeAssistant, fake) -> None:
     fake.tls_error = True
-    result = await hass.config_entries.flow.async_init(
-        DOMAIN, context={"source": config_entries.SOURCE_USER}
-    )
+    result = await hass.config_entries.flow.async_init(DOMAIN, context={"source": config_entries.SOURCE_USER})
     result = await hass.config_entries.flow.async_configure(
         result["flow_id"], {**USER_INPUT, CONF_VERIFY_SSL: True}
     )
     assert result["errors"] == {"base": "invalid_cert"}
+
+
+async def test_unique_ids_migrate_and_do_not_collide(hass: HomeAssistant, fake) -> None:
+    from homeassistant.helpers import entity_registry as er
+
+    from .fakefw import certs_device_with_vsys_copy
+
+    # Entities registered by earlier versions, keyed by name only.
+    reg = er.async_get(hass)
+    old_cert = reg.async_get_or_create(
+        "sensor", DOMAIN, "legacy_entry_cert_fw_example_net", suggested_object_id="my_fw_cert"
+    )
+    old_gp = reg.async_get_or_create(
+        "binary_sensor", DOMAIN, "legacy_entry_gp_user_alice", suggested_object_id="my_alice"
+    )
+    fake.certs_device = certs_device_with_vsys_copy()
+    fake.gp_online = {"alice", "a.b", "a_b"}
+    entry = await _setup(hass, fake, entry_id="legacy_entry")
+
+    # Existing entity ids survive the unique-id change.
+    cert = reg.async_get(old_cert.entity_id)
+    assert cert is not None and cert.unique_id != "legacy_entry_cert_fw_example_net"
+    assert hass.states.get(old_cert.entity_id).attributes["days_left"] in (9, 10)
+    gp = reg.async_get(old_gp.entity_id)
+    assert gp is not None and gp.unique_id != "legacy_entry_gp_user_alice"
+    assert hass.states.get(old_gp.entity_id).state == "on"
+
+    # Same certificate name in another vsys, and usernames that slug the same, all get entities.
+    names = {s.name for s in hass.states.async_all()}
+    assert "Edge HA pair Certificate fw.example.net (vsys1)" in names
+    gp_uids = {
+        e.unique_id
+        for e in er.async_entries_for_config_entry(reg, entry.entry_id)
+        if e.unique_id.startswith("legacy_entry_gp_user_")
+    }
+    assert len(gp_uids) == 4  # alice, a.b, a_b, and carol from previous users
+    assert not any(
+        e.unique_id.startswith("legacy_entry_cert_fw_example_net") and e.disabled_by
+        for e in er.async_entries_for_config_entry(reg, entry.entry_id)
+    )

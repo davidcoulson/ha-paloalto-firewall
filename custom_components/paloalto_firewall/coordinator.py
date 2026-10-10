@@ -19,13 +19,12 @@ from homeassistant.util import dt as dt_util
 
 from . import parsers
 from .api import PanOSAuthError, PanOSClient, PanOSError
-from .devices import get_device
 from .const import (
     CMD_ADMINS,
     CMD_CONTENT_CHECK,
-    CMD_GP_CLIENT_CHECK,
     CMD_DATAPLANE,
     CMD_ENVIRONMENTALS,
+    CMD_GP_CLIENT_CHECK,
     CMD_GP_USERS,
     CMD_HA_STATE,
     CMD_IPSEC_SA,
@@ -39,6 +38,7 @@ from .const import (
     MANUFACTURER,
     UPDATE_CHECK_TIMEOUT,
 )
+from .devices import get_device
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -168,10 +168,8 @@ class PanOSDeviceCoordinator(_BaseCoordinator):
             "admins": (CMD_ADMINS, parsers.parse_admins),
             "ipsec": (CMD_IPSEC_SA, parsers.parse_ipsec_sa),
         }
-        results = await asyncio.gather(
-            *(self._optional(k, cmd, fn) for k, (cmd, fn) in optional.items())
-        )
-        data: dict[str, Any] = {"system": system, **dict(zip(optional, results))}
+        results = await asyncio.gather(*(self._optional(k, cmd, fn) for k, (cmd, fn) in optional.items()))
+        data: dict[str, Any] = {"system": system, **dict(zip(optional, results, strict=True))}
         data["boot_time"] = self._stable_boot_time(system.get("uptime_seconds"))
         self._sync_device_registry(system)
         return data
@@ -212,9 +210,7 @@ class PanOSUpdatesCoordinator(_BaseCoordinator):
             self._optional(
                 "software", CMD_SOFTWARE_CHECK, parsers.parse_software_check, UPDATE_CHECK_TIMEOUT
             ),
-            self._optional(
-                "content", CMD_CONTENT_CHECK, parsers.parse_content_check, UPDATE_CHECK_TIMEOUT
-            ),
+            self._optional("content", CMD_CONTENT_CHECK, parsers.parse_content_check, UPDATE_CHECK_TIMEOUT),
             self._optional("licenses", CMD_LICENSE_INFO, parsers.parse_licenses),
             self._optional(
                 "gp_client", CMD_GP_CLIENT_CHECK, parsers.parse_software_check, UPDATE_CHECK_TIMEOUT
@@ -222,8 +218,7 @@ class PanOSUpdatesCoordinator(_BaseCoordinator):
         )
         if software is None and content is None and licenses is None:
             raise UpdateFailed(
-                f"{self.unit.host}: update and licence checks all failed "
-                "(no route to the update server?)"
+                f"{self.unit.host}: update and licence checks all failed (no route to the update server?)"
             )
         return {
             "software": software,
@@ -315,7 +310,8 @@ class PanOSPairTracker:
             if ha.get("peer_conn_status") != "up":
                 problems.append(f"{unit.config.hostname}: peer connection {ha.get('peer_conn_status')}")
             if ha.get("running_sync_enabled") and ha.get("running_sync") != "synchronized":
-                problems.append(f"{unit.config.hostname}: config {ha.get('running_sync') or 'not synchronized'}")
+                sync = ha.get("running_sync") or "not synchronized"
+                problems.append(f"{unit.config.hostname}: config {sync}")
             if ha.get("local_state") in ("suspended", "non-functional", "tentative", "initial"):
                 problems.append(f"{unit.config.hostname}: {ha.get('local_state')}")
         active = [s for s in states if s in ("active", "active-primary", "active-secondary")]
@@ -328,11 +324,7 @@ class PanOSPairTracker:
     @callback
     def _handle_update(self) -> None:
         new_index = self.compute_active_index()
-        if (
-            new_index is not None
-            and self.active_index is not None
-            and new_index != self.active_index
-        ):
+        if new_index is not None and self.active_index is not None and new_index != self.active_index:
             old = self.units[self.active_index].config
             new = self.units[new_index].config
             self.last_failover = dt_util.utcnow()

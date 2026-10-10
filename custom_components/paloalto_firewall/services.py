@@ -4,11 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
-from typing import Any
+from typing import Any, cast
 from xml.sax.saxutils import escape
 
 import voluptuous as vol
-
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant, ServiceCall, ServiceResponse, SupportsResponse
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
@@ -28,8 +27,8 @@ from .const import (
     LOOKUP_TIMEOUT,
     SERVICE_CHECK_UPDATES,
     SERVICE_LOOKUP,
-    SERVICE_SESSION_LOOKUP,
     SERVICE_ROUTE_LOOKUP,
+    SERVICE_SESSION_LOOKUP,
     SERVICE_TEST_NAT_POLICY,
     SERVICE_TEST_SECURITY_POLICY,
 )
@@ -156,11 +155,7 @@ def build_nat_match_cmd(data: dict[str, Any]) -> str:
 
 
 def _get_entry(hass: HomeAssistant, entry_id: str | None) -> PanOSConfigEntry:
-    loaded = [
-        e
-        for e in hass.config_entries.async_entries(DOMAIN)
-        if e.state is ConfigEntryState.LOADED
-    ]
+    loaded = [e for e in hass.config_entries.async_entries(DOMAIN) if e.state is ConfigEntryState.LOADED]
     if entry_id:
         for entry in loaded:
             if entry.entry_id == entry_id:
@@ -169,9 +164,7 @@ def _get_entry(hass: HomeAssistant, entry_id: str | None) -> PanOSConfigEntry:
     if not loaded:
         raise ServiceValidationError("No Palo Alto firewall is set up and loaded")
     if len(loaded) > 1:
-        raise ServiceValidationError(
-            "More than one firewall is configured; pass config_entry_id to pick one"
-        )
+        raise ServiceValidationError("More than one firewall is configured; pass config_entry_id to pick one")
     return loaded[0]
 
 
@@ -198,7 +191,7 @@ async def _query_unit(unit: PanOSUnit, source: str) -> tuple[dict[str, list], di
     data: dict[str, list] = {"arp": [], "dhcp": []}
     errors: dict[str, str] = {}
     connection_errors = 0
-    for name, result in zip(wanted, results):
+    for name, result in zip(wanted, results, strict=True):
         if isinstance(result, PanOSConnectionError):
             connection_errors += 1
             errors[name] = str(result)
@@ -261,7 +254,7 @@ def _compact_rule(rule: dict[str, Any]) -> dict[str, Any]:
     out = {}
     for k, v in rule.items():
         if isinstance(v, list) and len(v) > _LIST_CAP:
-            v = v[:_LIST_CAP] + [f"... {len(v) - _LIST_CAP} more"]
+            v = [*v[:_LIST_CAP], f"... {len(v) - _LIST_CAP} more"]
         out[k] = v
     return out
 
@@ -320,8 +313,12 @@ async def _run_policy_test(call: ServiceCall, kind: str) -> ServiceResponse:
             hops = []
             running_nat: dict[str | None, dict[str, Any]] = {}
             for i, hop in enumerate(plan, 1):
-                data = {**base, "vsys": hop.get("vsys"), "from_zone": hop.get("from_zone"),
-                        "to_zone": hop.get("to_zone")}
+                data = {
+                    **base,
+                    "vsys": hop.get("vsys"),
+                    "from_zone": hop.get("from_zone"),
+                    "to_zone": hop.get("to_zone"),
+                }
                 if kind == "nat":
                     data["to_interface"] = base.get("to_interface") or hop.get("egress_interface")
                 cmd = build_policy_match_cmd(data) if kind == "security" else build_nat_match_cmd(data)
@@ -352,7 +349,8 @@ async def _run_policy_test(call: ServiceCall, kind: str) -> ServiceResponse:
             raise HomeAssistantError(f"{unit.config.hostname}: {err}") from err
 
         criteria = {
-            k: v for k, v in base.items()
+            k: v
+            for k, v in base.items()
             if k not in (ATTR_CONFIG_ENTRY_ID, "show_all") and v not in (None, "")
         }
         response: dict[str, Any] = {
@@ -363,9 +361,7 @@ async def _run_policy_test(call: ServiceCall, kind: str) -> ServiceResponse:
         }
         if kind == "security":
             # The flow is allowed only if every hop allows it.
-            deciding = next(
-                (h for h in hops if not h["matched"] or h["action"] != "allow"), None
-            )
+            deciding = next((h for h in hops if not h["matched"] or h["action"] != "allow"), None)
             if deciding is None and hops:
                 response.update(verdict="allow", rule=hops[-1]["rule"], decided_at_hop=None)
             elif deciding is not None:
@@ -423,9 +419,7 @@ async def _async_route_lookup(call: ServiceCall) -> ServiceResponse:
         all_lrs = sorted({r["logical_router"] for r in fib})
         if lr := call.data.get("logical_router"):
             if lr not in all_lrs:
-                raise ServiceValidationError(
-                    f"Unknown logical router {lr!r}; known: {', '.join(all_lrs)}"
-                )
+                raise ServiceValidationError(f"Unknown logical router {lr!r}; known: {', '.join(all_lrs)}")
             lrs, chosen_by = [lr], "logical_router"
         elif src := call.data.get("source"):
             ingress = ingress_interface(interfaces, fib, src)
@@ -535,7 +529,7 @@ async def _async_session_lookup(call: ServiceCall) -> ServiceResponse:
             "total": total,
             "returned": min(len(sessions), limit),
             "truncated": total > limit,
-            "sessions": sessions[:limit],
+            "sessions": cast(list[Any], sessions[:limit]),
         }
     raise HomeAssistantError(f"No firewall could be reached: {last_error}")
 
@@ -582,41 +576,41 @@ def async_setup_services(hass: HomeAssistant) -> None:
         DOMAIN,
         SERVICE_SESSION_LOOKUP,
         _async_session_lookup,
-        schema=SESSION_SCHEMA,
+        schema=SESSION_SCHEMA,  # type: ignore[arg-type]  # HA types schemas as probatio
         supports_response=SupportsResponse.ONLY,
     )
     hass.services.async_register(
         DOMAIN,
         SERVICE_CHECK_UPDATES,
         _async_check_updates,
-        schema=CHECK_UPDATES_SCHEMA,
+        schema=CHECK_UPDATES_SCHEMA,  # type: ignore[arg-type]  # HA types schemas as probatio
         supports_response=SupportsResponse.OPTIONAL,
     )
     hass.services.async_register(
         DOMAIN,
         SERVICE_LOOKUP,
         _async_lookup,
-        schema=LOOKUP_SCHEMA,
+        schema=LOOKUP_SCHEMA,  # type: ignore[arg-type]  # HA types schemas as probatio
         supports_response=SupportsResponse.ONLY,
     )
     hass.services.async_register(
         DOMAIN,
         SERVICE_TEST_SECURITY_POLICY,
         _async_test_policy,
-        schema=POLICY_SCHEMA,
+        schema=POLICY_SCHEMA,  # type: ignore[arg-type]  # HA types schemas as probatio
         supports_response=SupportsResponse.ONLY,
     )
     hass.services.async_register(
         DOMAIN,
         SERVICE_TEST_NAT_POLICY,
         _async_test_nat,
-        schema=NAT_SCHEMA,
+        schema=NAT_SCHEMA,  # type: ignore[arg-type]  # HA types schemas as probatio
         supports_response=SupportsResponse.ONLY,
     )
     hass.services.async_register(
         DOMAIN,
         SERVICE_ROUTE_LOOKUP,
         _async_route_lookup,
-        schema=ROUTE_SCHEMA,
+        schema=ROUTE_SCHEMA,  # type: ignore[arg-type]  # HA types schemas as probatio
         supports_response=SupportsResponse.ONLY,
     )

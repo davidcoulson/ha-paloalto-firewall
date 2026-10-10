@@ -25,16 +25,12 @@ class PanOSUnitEntity(CoordinatorEntity[PanOSDeviceCoordinator]):
 
     _attr_has_entity_name = True
 
-    def __init__(
-        self, entry: PanOSConfigEntry, unit: PanOSUnit, description: EntityDescription
-    ) -> None:
+    def __init__(self, entry: PanOSConfigEntry, unit: PanOSUnit, description: EntityDescription) -> None:
         super().__init__(unit.coordinator)
         self.entity_description = description
         self.unit = unit
         self._attr_unique_id = f"{unit.config.serial}_{description.key}"
-        self._attr_device_info = unit_device_info(
-            entry, unit.config, entry.runtime_data.pair is not None
-        )
+        self._attr_device_info = unit_device_info(entry, unit.config, entry.runtime_data.pair is not None)
 
     @property
     def data(self) -> dict[str, Any]:
@@ -46,16 +42,12 @@ class PanOSUpdatesEntity(CoordinatorEntity[PanOSUpdatesCoordinator]):
 
     _attr_has_entity_name = True
 
-    def __init__(
-        self, entry: PanOSConfigEntry, unit: PanOSUnit, description: EntityDescription
-    ) -> None:
+    def __init__(self, entry: PanOSConfigEntry, unit: PanOSUnit, description: EntityDescription) -> None:
         super().__init__(unit.updates)
         self.entity_description = description
         self.unit = unit
         self._attr_unique_id = f"{unit.config.serial}_{description.key}"
-        self._attr_device_info = unit_device_info(
-            entry, unit.config, entry.runtime_data.pair is not None
-        )
+        self._attr_device_info = unit_device_info(entry, unit.config, entry.runtime_data.pair is not None)
 
     @property
     def available(self) -> bool:
@@ -107,9 +99,7 @@ class PanOSNetworkEntity(CoordinatorEntity[PanOSNetworkCoordinator]):
     ) -> None:
         super().__init__(entry.runtime_data.network)
         self._attr_unique_id = f"{entry.entry_id}_{key}"
-        self._attr_device_info = device_info or DeviceInfo(
-            identifiers={parent_identifier(entry)}
-        )
+        self._attr_device_info = device_info or DeviceInfo(identifiers={parent_identifier(entry)})
 
     @property
     def data(self) -> dict:

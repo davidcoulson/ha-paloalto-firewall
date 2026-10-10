@@ -9,7 +9,6 @@ from typing import Any
 
 import aiohttp
 import voluptuous as vol
-
 from homeassistant.config_entries import ConfigEntry, ConfigFlow, ConfigFlowResult, OptionsFlow
 from homeassistant.const import CONF_NAME, CONF_PASSWORD, CONF_USERNAME, CONF_VERIFY_SSL
 from homeassistant.core import HomeAssistant, callback
@@ -31,6 +30,7 @@ from .api import PanOSAuthError, PanOSClient, PanOSError
 from .const import (
     CMD_HA_STATE,
     CMD_SYSTEM_INFO,
+    CONF_AUTO_INTERFACES,
     CONF_INTERFACES,
     CONF_PRIMARY_HOST,
     CONF_SCAN_INTERVAL,
@@ -101,9 +101,7 @@ def _user_schema(defaults: Mapping[str, Any]) -> vol.Schema:
                 description={"suggested_value": defaults.get(CONF_SECONDARY_HOST)},
             ): str,
             vol.Required(CONF_USERNAME, default=defaults.get(CONF_USERNAME, "")): str,
-            vol.Required(CONF_PASSWORD): TextSelector(
-                TextSelectorConfig(type=TextSelectorType.PASSWORD)
-            ),
+            vol.Required(CONF_PASSWORD): TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD)),
             vol.Required(CONF_VERIFY_SSL, default=defaults.get(CONF_VERIFY_SSL, True)): bool,
         }
     )
@@ -139,7 +137,7 @@ class PanOSConfigFlow(ConfigFlow, domain=DOMAIN):
             except CannotConnect as err:
                 errors["base"] = "cannot_connect"
                 placeholders["host"] = err.host
-            except Exception:  # noqa: BLE001
+            except Exception:
                 _LOGGER.exception("Unexpected error validating firewall")
                 errors["base"] = "unknown"
             else:
@@ -167,7 +165,7 @@ class PanOSConfigFlow(ConfigFlow, domain=DOMAIN):
                     )
         return self.async_show_form(
             step_id="user",
-            data_schema=_user_schema(user_input or {}),
+            data_schema=_user_schema(user_input or {}),  # type: ignore[arg-type]  # HA types schemas as probatio
             errors=errors,
             description_placeholders=placeholders,
         )
@@ -175,9 +173,7 @@ class PanOSConfigFlow(ConfigFlow, domain=DOMAIN):
     async def async_step_reauth(self, entry_data: Mapping[str, Any]) -> ConfigFlowResult:
         return await self.async_step_reauth_confirm()
 
-    async def async_step_reauth_confirm(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
+    async def async_step_reauth_confirm(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         entry = self._get_reauth_entry()
         errors: dict[str, str] = {}
         placeholders = {"host": ""}
@@ -212,7 +208,7 @@ class PanOSConfigFlow(ConfigFlow, domain=DOMAIN):
             errors.setdefault("base", "cannot_connect")
         return self.async_show_form(
             step_id="reauth_confirm",
-            data_schema=vol.Schema(
+            data_schema=vol.Schema(  # type: ignore[arg-type]  # HA types schemas as probatio
                 {
                     vol.Required(CONF_USERNAME, default=entry.data[CONF_USERNAME]): str,
                     vol.Required(CONF_PASSWORD): TextSelector(
@@ -248,30 +244,33 @@ class PanOSOptionsFlow(OptionsFlow):
             current = network.selected_interfaces(network.data)
             auto = network.auto_interfaces(network.data)
         if user_input is not None:
-            options = {
+            new_options: dict[str, Any] = {
                 CONF_SCAN_INTERVAL: int(user_input[CONF_SCAN_INTERVAL]),
                 CONF_UPDATE_INTERVAL: int(user_input[CONF_UPDATE_INTERVAL]),
             }
-            if CONF_INTERFACES in user_input:
-                chosen = list(user_input[CONF_INTERFACES])
-                # The form is pre-filled, so an unchanged automatic selection
-                # comes back too; keep it automatic rather than freezing it.
-                if auto is None or sorted(chosen) != sorted(auto):
-                    options[CONF_INTERFACES] = chosen
-            elif CONF_INTERFACES in self.config_entry.options:
-                options[CONF_INTERFACES] = self.config_entry.options[CONF_INTERFACES]
-            return self.async_create_entry(data=options)
+            automatic = user_input.get(CONF_AUTO_INTERFACES, CONF_INTERFACES not in self.config_entry.options)
+            if not automatic:
+                if CONF_INTERFACES in user_input:
+                    new_options[CONF_INTERFACES] = list(user_input[CONF_INTERFACES])
+                elif CONF_INTERFACES in self.config_entry.options:
+                    new_options[CONF_INTERFACES] = self.config_entry.options[CONF_INTERFACES]
+                else:
+                    # Switching to manual without touching the list: start
+                    # from what's monitored now.
+                    new_options[CONF_INTERFACES] = list(auto or current)
+            return self.async_create_entry(data=new_options)
         options = self.config_entry.options
         extra: dict = {}
         if available:
+            extra[
+                vol.Required(CONF_AUTO_INTERFACES, default=CONF_INTERFACES not in self.config_entry.options)
+            ] = bool
             extra[vol.Optional(CONF_INTERFACES, default=current)] = SelectSelector(
-                SelectSelectorConfig(
-                    options=available, multiple=True, mode=SelectSelectorMode.DROPDOWN
-                )
+                SelectSelectorConfig(options=available, multiple=True, mode=SelectSelectorMode.DROPDOWN)
             )
         return self.async_show_form(
             step_id="init",
-            data_schema=vol.Schema(
+            data_schema=vol.Schema(  # type: ignore[arg-type]  # HA types schemas as probatio
                 {
                     vol.Required(
                         CONF_SCAN_INTERVAL,

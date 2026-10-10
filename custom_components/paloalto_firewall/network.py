@@ -10,8 +10,8 @@ import asyncio
 import ipaddress
 import logging
 import time
-from datetime import datetime, timedelta
 from collections.abc import Callable
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from homeassistant.core import HomeAssistant, callback
@@ -23,14 +23,12 @@ from homeassistant.util import dt as dt_util
 from . import parsers
 from .api import PanOSAuthError, PanOSError
 from .const import (
-    CMD_CERTS_DEVICE,
-    CMD_CERTS_STORE,
-    CMD_GP_PREVIOUS,
-    EVENT_GP_CONNECT,
-    EVENT_GP_DISCONNECT,
     CMD_BGP_PEERS_LR,
     CMD_BGP_SUMMARY,
+    CMD_CERTS_DEVICE,
+    CMD_CERTS_STORE,
     CMD_FIB,
+    CMD_GP_PREVIOUS,
     CMD_INTERFACE_ALL,
     CMD_JOBS,
     CMD_PATH_MONITOR,
@@ -40,6 +38,8 @@ from .const import (
     DOMAIN,
     EVENT_BGP_PEER_CHANGE,
     EVENT_EGRESS_CHANGE,
+    EVENT_GP_CONNECT,
+    EVENT_GP_DISCONNECT,
     EVENT_PREFIX_CHANGE,
     MANUFACTURER,
     PROBE_IPV4,
@@ -50,7 +50,6 @@ from .const import (
 )
 
 if TYPE_CHECKING:
-
     from .coordinator import PanOSConfigEntry, PanOSUnit
 
 _LOGGER = logging.getLogger(__name__)
@@ -77,9 +76,7 @@ def pick_unit(entry: PanOSConfigEntry) -> PanOSUnit:
     runtime = entry.runtime_data
     if runtime.pair is not None and runtime.pair.active_unit is not None:
         return runtime.pair.active_unit
-    return next(
-        (u for u in runtime.units if u.coordinator.last_update_success), runtime.units[0]
-    )
+    return next((u for u in runtime.units if u.coordinator.last_update_success), runtime.units[0])
 
 
 def egress(
@@ -115,9 +112,7 @@ def egress(
     }
 
 
-def source_interface(
-    interfaces: dict[str, dict[str, Any]], address: str
-) -> dict[str, Any] | None:
+def source_interface(interfaces: dict[str, dict[str, Any]], address: str) -> dict[str, Any] | None:
     """The interface whose connected subnet contains ``address`` (longest match)."""
     ip = ipaddress.ip_address(address)
     best, best_len = None, -1
@@ -141,6 +136,33 @@ def pm_key_suffix(key: str) -> str:
 
 def safe_key(value: str) -> str:
     return "".join(c if c.isalnum() else "_" for c in value)
+
+
+def name_key(*parts: Any) -> str:
+    """Collision-free unique-id fragment for free-form names.
+
+    ``safe_key`` alone maps 'john.doe' and 'john_doe' to the same id; a short
+    hash of the exact name (and any qualifiers, e.g. vsys) keeps them apart.
+    """
+    import hashlib
+
+    raw = "\x1f".join(str(p) for p in parts)
+    return f"{safe_key(str(parts[0]))}_{hashlib.sha1(raw.encode()).hexdigest()[:6]}"
+
+
+def cert_uid_suffix(name: str, vsys: Any) -> str:
+    return f"cert_{name_key(name, vsys)}"
+
+
+def migrate_unique_id(hass: HomeAssistant, domain: str, old: str, new: str) -> None:
+    """Move an entity to a new unique id, keeping its entity_id and customisations."""
+    from homeassistant.helpers import entity_registry as er
+
+    registry = er.async_get(hass)
+    if registry.async_get_entity_id(domain, DOMAIN, new):
+        return
+    if entity_id := registry.async_get_entity_id(domain, DOMAIN, old):
+        registry.async_update_entity(entity_id, new_unique_id=new)
 
 
 def logical_routers(data: dict[str, Any]) -> list[str]:
@@ -271,9 +293,7 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         if unit_changed or self._slow_at is None or now - self._slow_at >= self.slow_interval:
             await self._refresh_slow(unit, interfaces)
             self._slow_at = now
-        data.update(
-            {k: v for k, v in self._slow.items() if k not in ("unit", "bgp_ok", "certs_device_ok")}
-        )
+        data.update({k: v for k, v in self._slow.items() if k not in ("unit", "bgp_ok", "certs_device_ok")})
         data["gp_users"] = self._gp_users(gp_current, data.get("gp_previous"))
         if gp_current is not None:
             # Unknown current users (read failed) must not look like everyone
@@ -309,7 +329,8 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 self._gp_seen[name] = sessions[0]
             recent = last.get(name)
             seen = self._gp_seen.get(name)
-            if not sessions and seen and (recent is None or (recent.get("login_time") or "") < (seen.get("login_time") or "")):
+            seen_at = (seen or {}).get("login_time") or ""
+            if not sessions and seen and (recent is None or (recent.get("login_time") or "") < seen_at):
                 # Disconnected since we last saw them, before the firewall's
                 # previous-user history caught up.
                 recent = seen
@@ -362,32 +383,33 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             action()
 
         unsub = self.async_add_listener(_listener)
-        return lambda: unsub() if unsub else None
+
+        def _cancel() -> None:
+            if unsub is not None:
+                unsub()
+
+        return _cancel
 
     def remember_gp_users(self, users: set[str]) -> None:
         """Users known from earlier runs keep reporting (as disconnected)."""
         self._gp_known |= users
         if self.data is not None and self.data.get("gp_users") is not None:
             for name in users - set(self.data["gp_users"]):
-                self.data["gp_users"][name] = {
-                    "connected": False, "sessions": [], "last_session": None
-                }
+                self.data["gp_users"][name] = {"connected": False, "sessions": [], "last_session": None}
 
     def request_slow_refresh(self) -> None:
         """Make the next poll re-read the slow tier."""
         self._slow_at = None
 
     async def _refresh_slow(self, unit: PanOSUnit, interfaces: dict[str, Any]) -> None:
-        jobs, pending, prefix_pools, bgp, gp_previous, certs_device, certs_store = (
-            await asyncio.gather(
-                self._optional(unit, "jobs", CMD_JOBS, parsers.parse_jobs),
-                self._optional(unit, "pending", CMD_PENDING_CHANGES, parsers.parse_pending_changes),
-                self._prefix_pools(unit, interfaces),
-                self._bgp(unit),
-                self._optional(unit, "gp_previous", CMD_GP_PREVIOUS, parsers.parse_gp_sessions),
-                self._optional(unit, "certs_device", CMD_CERTS_DEVICE, parsers.parse_device_certs),
-                self._optional(unit, "certs_store", CMD_CERTS_STORE, parsers.parse_cert_store),
-            )
+        jobs, pending, prefix_pools, bgp, gp_previous, certs_device, certs_store = await asyncio.gather(
+            self._optional(unit, "jobs", CMD_JOBS, parsers.parse_jobs),
+            self._optional(unit, "pending", CMD_PENDING_CHANGES, parsers.parse_pending_changes),
+            self._prefix_pools(unit, interfaces),
+            self._bgp(unit),
+            self._optional(unit, "gp_previous", CMD_GP_PREVIOUS, parsers.parse_gp_sessions),
+            self._optional(unit, "certs_device", CMD_CERTS_DEVICE, parsers.parse_device_certs),
+            self._optional(unit, "certs_store", CMD_CERTS_STORE, parsers.parse_cert_store),
         )
         same_unit = self._slow.get("unit") == unit.config.hostname
         prefix_ok = prefix_pools is not None
@@ -427,15 +449,13 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         enabled = [lr for lr, info in summary.items() if info["enabled"]]
         peers = await asyncio.gather(
             *(
-                self._optional(
-                    unit, f"bgp_peers {lr}", CMD_BGP_PEERS_LR.format(lr), parsers.parse_bgp_peers
-                )
+                self._optional(unit, f"bgp_peers {lr}", CMD_BGP_PEERS_LR.format(lr), parsers.parse_bgp_peers)
                 for lr in enabled
             )
         )
         return {
             lr: {**summary[lr], "peers": lr_peers if lr_peers is not None else {}, "ok": lr_peers is not None}
-            for lr, lr_peers in zip(enabled, peers)
+            for lr, lr_peers in zip(enabled, peers, strict=True)
         }
 
     def _fire_bgp_events(self, bgp: dict[str, dict[str, Any]]) -> None:
@@ -473,7 +493,7 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             return None
         if not pools:
             return {}
-        nat_by_vsys: dict[str, dict[str, Any] | None] = {}
+        nat_by_vsys: dict[str | None, dict[str, Any] | None] = {}
         out: dict[str, dict[str, Any]] = {}
         for name, pool in pools.items():
             vsys = interfaces.get(pool["interface"] or "", {}).get("vsys")
@@ -488,9 +508,7 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                     _LOGGER.debug("running nat-policy for %s unavailable: %s", vsys, err)
                     nat_by_vsys[vsys] = None
             rules = nat_by_vsys[vsys]
-            problems, checked = (
-                parsers.nptv6_mismatches(rules, pool) if rules is not None else ([], [])
-            )
+            problems, checked = parsers.nptv6_mismatches(rules, pool) if rules is not None else ([], [])
             out[name] = {
                 **pool,
                 "vsys": vsys,
@@ -579,12 +597,8 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 key = (lr, version)
                 if key in self._prev_egress and self._prev_egress[key] != cur_if:
                     old_if = self._prev_egress[key]
-                    old_zone = (
-                        (self.data or {}).get("interfaces", {}).get(old_if or "", {}).get("zone")
-                    )
-                    _LOGGER.warning(
-                        "%s %s internet egress changed: %s -> %s", lr, fam, old_if, cur_if
-                    )
+                    old_zone = (self.data or {}).get("interfaces", {}).get(old_if or "", {}).get("zone")
+                    _LOGGER.warning("%s %s internet egress changed: %s -> %s", lr, fam, old_if, cur_if)
                     self.hass.bus.async_fire(
                         EVENT_EGRESS_CHANGE,
                         {

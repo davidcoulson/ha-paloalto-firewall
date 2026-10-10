@@ -94,9 +94,7 @@ class PanOSClient:
             self.api_key = key.strip()
             return self.api_key
 
-    async def op(
-        self, cmd: str, timeout: int = DEFAULT_TIMEOUT, vsys: str | None = None
-    ) -> ET.Element:
+    async def op(self, cmd: str, timeout: int = DEFAULT_TIMEOUT, vsys: str | None = None) -> ET.Element:
         """Run an operational command and return its <result> element.
 
         ``vsys`` sets the target vsys for this request only (multi-vsys).
@@ -139,7 +137,7 @@ class PanOSClient:
                 ) as resp:
                     text = await resp.text()
                     status = resp.status
-            except (aiohttp.ClientError, asyncio.TimeoutError) as err:
+            except (TimeoutError, aiohttp.ClientError) as err:
                 raise PanOSConnectionError(
                     f"Error talking to {self.host}: {err or type(err).__name__}"
                 ) from err

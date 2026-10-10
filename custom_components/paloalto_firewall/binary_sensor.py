@@ -18,11 +18,10 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.util import dt as dt_util
 
 from .const import CERT_WARN_DAYS
-from .parsers import certs_expiring
-
 from .coordinator import PanOSConfigEntry
 from .entity import PanOSNetworkEntity, PanOSPairEntity, PanOSUnitEntity, PanOSUpdatesEntity
-from .network import lr_device_info, pm_key_suffix, safe_key
+from .network import lr_device_info, migrate_unique_id, name_key, pm_key_suffix, safe_key
+from .parsers import certs_expiring
 
 Data = dict[str, Any]
 
@@ -130,21 +129,27 @@ def _track_gp_users(
         return
     prefix = f"{entry.entry_id}_{GP_UID}"
     restored = {
-        ent.original_name[len(GP_NAME):]
+        ent.original_name[len(GP_NAME) :]
         for ent in er.async_entries_for_config_entry(er.async_get(hass), entry.entry_id)
-        if ent.unique_id.startswith(prefix)
-        and ent.original_name
-        and ent.original_name.startswith(GP_NAME)
+        if ent.unique_id.startswith(prefix) and ent.original_name and ent.original_name.startswith(GP_NAME)
     }
     network.remember_gp_users(restored)
     added: set[str] = set()
 
     @callback
     def _add_new() -> None:
-        users = set(((network.data or {}).get("gp_users") or {})) | restored
+        users = set((network.data or {}).get("gp_users") or {}) | restored
         new = sorted(users - added)
         if new:
             added.update(new)
+            for user in new:
+                # Earlier versions keyed users by a lossy name only.
+                migrate_unique_id(
+                    hass,
+                    "binary_sensor",
+                    f"{prefix}{safe_key(user)}",
+                    f"{prefix}{name_key(user)}",
+                )
             async_add_entities(PanOSGlobalProtectUser(entry, u) for u in new)
 
     _add_new()
@@ -402,7 +407,7 @@ class PanOSGlobalProtectUser(PanOSNetworkEntity, BinarySensorEntity):
     _attr_icon = "mdi:vpn"
 
     def __init__(self, entry: PanOSConfigEntry, username: str) -> None:
-        super().__init__(entry, f"{GP_UID}{safe_key(username)}")
+        super().__init__(entry, f"{GP_UID}{name_key(username)}")
         self._user = username
         self._attr_name = f"{GP_NAME}{username}"
 
@@ -501,7 +506,7 @@ def _track_network_entities(
             return
         new = [e for e in network_binary_sensors(entry) if e.unique_id not in added]
         if new:
-            added.update(e.unique_id for e in new)
+            added.update(str(e.unique_id) for e in new)
             async_add_entities(new)
 
     _sync()

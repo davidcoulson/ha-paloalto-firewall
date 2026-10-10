@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import UTC
+
 from custom_components.paloalto_firewall import const
 from custom_components.paloalto_firewall.api import (
     PanOSAuthError,
@@ -53,17 +55,22 @@ ENV = OK.format("""<thermal><Slot1><entry><slot>1</slot><description>Temperature
 <entry><slot>1</slot><description>Temperature @ Board</description><min>0</min><max>70</max><alarm>False</alarm><DegreesC>41.0</DegreesC></entry></Slot1></thermal>
 <power><Slot1><entry><slot>1</slot><description>Power: 1.0V</description><alarm>False</alarm><Volts>1.0</Volts></entry></Slot1></power>""")
 
-GP_HOSTS = {"alice": ("alice-laptop", "198.51.100.7", "10.9.0.2"), "bob": ("bob-mac", "203.0.113.50", "10.9.0.3")}
+GP_HOSTS = {
+    "alice": ("alice-laptop", "198.51.100.7", "10.9.0.2"),
+    "bob": ("bob-mac", "203.0.113.50", "10.9.0.3"),
+}
 
 
 def _gp_entry(user, login=1790861465, logout=None, reason=None):
     computer, public, virtual = GP_HOSTS.get(user, (f"{user}-pc", "192.0.2.1", "10.9.0.9"))
-    out = (f"<entry><domain/><username>{user}</username><primary-username>{user}</primary-username>"
-           f"<computer>{computer}</computer><client>Apple Mac OS X 26.6.2</client>"
-           f"<app-version>6.3.3-1046</app-version><virtual-ip>{virtual}</virtual-ip>"
-           f"<virtual-ipv6>::</virtual-ipv6><public-ip>{public}</public-ip><public-ipv6>::</public-ipv6>"
-           f"<tunnel-type>IPSec</tunnel-type><source-region>US</source-region>"
-           f"<login-time-utc>{login}</login-time-utc>")
+    out = (
+        f"<entry><domain/><username>{user}</username><primary-username>{user}</primary-username>"
+        f"<computer>{computer}</computer><client>Apple Mac OS X 26.6.2</client>"
+        f"<app-version>6.3.3-1046</app-version><virtual-ip>{virtual}</virtual-ip>"
+        f"<virtual-ipv6>::</virtual-ipv6><public-ip>{public}</public-ip><public-ipv6>::</public-ipv6>"
+        f"<tunnel-type>IPSec</tunnel-type><source-region>US</source-region>"
+        f"<login-time-utc>{login}</login-time-utc>"
+    )
     if logout:
         out += f"<logout-time-utc>{logout}</logout-time-utc><reason>{reason}</reason>"
     return out + "</entry>"
@@ -89,7 +96,7 @@ GP_CLIENT = OK.format("""<sw-updates last-updated-at="2026/10/10 02:41:29"><msg/
 
 
 def _make_pem(cn, days, issuer_cn=None, sans=()):
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
 
     from cryptography import x509
     from cryptography.hazmat.primitives import hashes, serialization
@@ -97,7 +104,7 @@ def _make_pem(cn, days, issuer_cn=None, sans=()):
     from cryptography.x509.oid import NameOID
 
     key = ec.generate_private_key(ec.SECP256R1())
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     builder = (
         x509.CertificateBuilder()
         .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, cn)]))
@@ -144,6 +151,17 @@ def certs_device():
 
 CERTS_DEVICE, CERTS_STORE = certs_device()
 
+
+def certs_device_with_vsys_copy():
+    """The shared certs plus a vsys1 certificate that reuses a shared name."""
+    pem, _ = _make_pem("fw.example.net", 200, "E8")
+    extra = (
+        f"{'A' * 40}:{'B' * 40}\n    vsys id: 1\n    cert name: fw.example.net\n"
+        f"    subject name hash: AAAA\n    public key: {pem}    private key: exist\n\n"
+    )
+    return CERTS_DEVICE.replace("</result>", extra + "</result>", 1)
+
+
 SESSIONS = OK.format("""<entry><dst>1.1.1.1</dst><xsource>203.0.113.10</xsource><source>10.2.4.86</source>
 <xdst>1.1.1.1</xdst><xsport>40001</xsport><xdport>443</xdport><sport>51515</sport><dport>443</dport>
 <proto>6</proto><from>Core</from><to>Internet</to><start-time>Sat Oct 10 02:41:19 2026</start-time>
@@ -159,7 +177,9 @@ SESSION_COUNT = OK.format("<member>2</member>")
 SESSION_DETAIL = OK.format("""<slot>1</slot><c2s><source>10.2.4.86</source><dst>1.1.1.1</dst><dport>443</dport>
 <source-zone>Core</source-zone></c2s><application>ssl</application><rule>Allow web</rule><end-reason>unknown</end-reason>""")
 ADMINS = OK.format("<admins><entry><admin>admin</admin><from>10.0.0.50</from></entry></admins>")
-IPSEC = OK.format("<ntun>2</ntun><entries><entry><name>site-a</name></entry><entry><name>site-b</name></entry></entries>")
+IPSEC = OK.format(
+    "<ntun>2</ntun><entries><entry><name>site-a</name></entry><entry><name>site-b</name></entry></entries>"
+)
 
 SOFTWARE = OK.format("""<sw-updates last-updated-at="2026/10/07 11:00:00"><msg/><versions>
 <entry><version>11.2.5</version><downloaded>no</downloaded><current>no</current><latest>yes</latest><released-on>2026/09/01</released-on><release-notes><![CDATA[https://example.com/11.2.5]]></release-notes></entry>
@@ -197,7 +217,9 @@ POLICY_MATCH = OK.format("""<rules><entry name="IoT-to-Internet"><index>12</inde
 
 POLICY_MATCH_OLD = OK.format("<rules><entry>IoT-to-Internet; index: 12</entry></rules>")
 POLICY_NO_MATCH = OK.format("<rules/>")
-POLICY_DENY = OK.format('<rules><entry name="Block-WanB-Out"><index>4</index><action>deny</action></entry></rules>')
+POLICY_DENY = OK.format(
+    '<rules><entry name="Block-WanB-Out"><index>4</index><action>deny</action></entry></rules>'
+)
 
 
 # --- Advanced Routing / interfaces (synthetic, same shape as PAN-OS 12.1) ----
@@ -205,46 +227,55 @@ POLICY_DENY = OK.format('<rules><entry name="Block-WanB-Out"><index>4</index><ac
 
 
 def _ifnet(name, vsys, zone, fwd, ip, tag=0, addr6=""):
-    return (f"<entry><name>{name}</name><id>1</id><tag>{tag}</tag><vsys>{vsys}</vsys><zone>{zone}</zone>"
-            f"<fwd>{fwd}</fwd><ip>{ip}</ip><addr/><dyn-addr/><addr6>{addr6}</addr6></entry>")
+    return (
+        f"<entry><name>{name}</name><id>1</id><tag>{tag}</tag><vsys>{vsys}</vsys><zone>{zone}</zone>"
+        f"<fwd>{fwd}</fwd><ip>{ip}</ip><addr/><dyn-addr/><addr6>{addr6}</addr6></entry>"
+    )
 
 
 def interface_all(wan_b_link="up"):
     hw = "".join(
         f"<entry><name>{n}</name><id>1</id><type>0</type><mac>00:00:5e:00:53:0{i}</mac>"
         f"<speed>{sp}</speed><duplex>{dx}</duplex><state>{st}</state><st>x</st></entry>"
-        for i, (n, sp, dx, st) in enumerate([
-            ("ethernet1/1", "10000", "full", "up"),
-            ("ethernet1/2", "10000", "full", wan_b_link),
-            ("ae1", "[n/a]", "[n/a]", "up"),
-            ("ae9", "[n/a]", "[n/a]", "up"),
-            ("ha1-a", "1000", "full", "up"),
-        ])
+        for i, (n, sp, dx, st) in enumerate(
+            [
+                ("ethernet1/1", "10000", "full", "up"),
+                ("ethernet1/2", "10000", "full", wan_b_link),
+                ("ae1", "[n/a]", "[n/a]", "up"),
+                ("ae9", "[n/a]", "[n/a]", "up"),
+                ("ha1-a", "1000", "full", "up"),
+            ]
+        )
     )
-    ifnet = "".join([
-        _ifnet("ethernet1/1", "2", "Internet", "lr:wan-a-vr", "100.64.10.2/10"),
-        _ifnet("ethernet1/2", "3", "Internet", "lr:wan-b-vr", "203.0.113.10/24"),
-        _ifnet("ae1", "1", "Trusted", "lr:core-vr", "10.9.1.1/24"),
-        _ifnet("ae1.20", "1", "IoT", "lr:core-vr", "10.9.20.1/24", 20, "fd00:9:20::1/64"),
-        _ifnet("ae9.100", "1", "WanA", "lr:core-vr", "172.31.0.1/30", 100, "fd00:99:a::2/64"),
-        _ifnet("ae9.101", "1", "WanB", "lr:core-vr", "172.31.0.5/30", 101, "fd00:99:b::2/64"),
-        _ifnet("ae9.200", "2", "Core", "lr:wan-a-vr", "172.31.0.2/30", 200),
-        _ifnet("ae9.201", "3", "Core", "lr:wan-b-vr", "172.31.0.6/30", 201),
-        _ifnet("ha1-a", "0", "", "ha", "198.18.0.1/30"),
-    ])
+    ifnet = "".join(
+        [
+            _ifnet("ethernet1/1", "2", "Internet", "lr:wan-a-vr", "100.64.10.2/10"),
+            _ifnet("ethernet1/2", "3", "Internet", "lr:wan-b-vr", "203.0.113.10/24"),
+            _ifnet("ae1", "1", "Trusted", "lr:core-vr", "10.9.1.1/24"),
+            _ifnet("ae1.20", "1", "IoT", "lr:core-vr", "10.9.20.1/24", 20, "fd00:9:20::1/64"),
+            _ifnet("ae9.100", "1", "WanA", "lr:core-vr", "172.31.0.1/30", 100, "fd00:99:a::2/64"),
+            _ifnet("ae9.101", "1", "WanB", "lr:core-vr", "172.31.0.5/30", 101, "fd00:99:b::2/64"),
+            _ifnet("ae9.200", "2", "Core", "lr:wan-a-vr", "172.31.0.2/30", 200),
+            _ifnet("ae9.201", "3", "Core", "lr:wan-b-vr", "172.31.0.6/30", 201),
+            _ifnet("ha1-a", "0", "", "ha", "198.18.0.1/30"),
+        ]
+    )
     return OK.format(f"<hw>{hw}</hw><ifnet>{ifnet}</ifnet>")
 
 
 def _fib_entry(dst, iface, nh, flags="ug"):
-    return (f"<entry><id>1</id><dst>{dst}</dst><interface>{iface}</interface><nh_type>0</nh_type>"
-            f"<flags>{flags}</flags><nexthop>{nh}</nexthop><mtu>1500</mtu></entry>")
+    return (
+        f"<entry><id>1</id><dst>{dst}</dst><interface>{iface}</interface><nh_type>0</nh_type>"
+        f"<flags>{flags}</flags><nexthop>{nh}</nexthop><mtu>1500</mtu></entry>"
+    )
 
 
 def fib(core_v4_via="b"):
     via = {"a": ("ae9.100", "172.31.0.2"), "b": ("ae9.101", "172.31.0.6")}[core_v4_via]
     tables = {
         ("core-vr", 0): [
-            _fib_entry("0.0.0.0/1", *via), _fib_entry("128.0.0.0/1", *via),
+            _fib_entry("0.0.0.0/1", *via),
+            _fib_entry("128.0.0.0/1", *via),
             _fib_entry("10.9.0.0/16", "", "drop", "u"),
             _fib_entry("10.9.1.0/24", "ae1", "0.0.0.0", "u"),
             _fib_entry("10.9.20.0/24", "ae1.20", "0.0.0.0", "u"),
@@ -275,9 +306,12 @@ def path_monitor(wan_b_up=True):
             f"<monitorstatus-{i}>{'Success' if up else 'Failed'}</monitorstatus-{i}>"
             for i, m in enumerate(["192.0.2.53", "198.51.100.53"])
         )
-        return (f"<entry><destination>{dst}</destination><nexthop>{nh}</nexthop><metric>10</metric>"
-                f"<interface>{iface}</interface><pathmonitor-cond>Enabled(All)</pathmonitor-cond>"
-                f"<pathmonitor-status>{'Up' if up else 'Down'} </pathmonitor-status>{mons}</entry>")
+        return (
+            f"<entry><destination>{dst}</destination><nexthop>{nh}</nexthop><metric>10</metric>"
+            f"<interface>{iface}</interface><pathmonitor-cond>Enabled(All)</pathmonitor-cond>"
+            f"<pathmonitor-status>{'Up' if up else 'Down'} </pathmonitor-status>{mons}</entry>"
+        )
+
     return OK.format(
         entry("0.0.0.0/0", "100.64.0.1", "ethernet1/1", True)
         + entry("0.0.0.0/0", "203.0.113.1", "ethernet1/2", wan_b_up)
@@ -308,10 +342,13 @@ NAT_MATCH = OK.format("<rules>\n\t<entry>IoT-Hide-NAT</entry>\n</rules>")
 def pd_pools(wan_b_prefix="2001:db8:b00::/56"):
     def pool(name, prefix, iface, inherited):
         assign = "".join(f'<entry name="{n}"><address>{a}</address></entry>' for n, a in inherited)
-        return (f'<entry name="{name}"><prefix>{prefix}</prefix><interface>{iface}</interface>'
-                f"<lease>6 days 23:00:00</lease><preferred-lifetime>604800</preferred-lifetime>"
-                f"<valid-lifetime>604800</valid-lifetime><iaid>1</iaid><duid>x</duid><state>active</state>"
-                f"<inherited-interface/><address-assignment>{assign}</address-assignment></entry>")
+        return (
+            f'<entry name="{name}"><prefix>{prefix}</prefix><interface>{iface}</interface>'
+            f"<lease>6 days 23:00:00</lease><preferred-lifetime>604800</preferred-lifetime>"
+            f"<valid-lifetime>604800</valid-lifetime><iaid>1</iaid><duid>x</duid><state>active</state>"
+            f"<inherited-interface/><address-assignment>{assign}</address-assignment></entry>"
+        )
+
     return OK.format(
         "<pools>"
         + pool("wan-a", "2001:db8:a00::/56", "ethernet1/1", [("ae1.20", "2001:db8:a00:20::1")])
@@ -374,19 +411,37 @@ def running_nat(vsys):
     return OK.format(f"<member>{body}</member>")
 
 
-BGP_SUMMARY = OK.format('<json>{"core-vr": {"enabled": "yes", "router-id": "172.31.255.1", "local-as": 65000}, '
-                        '"wan-a-vr": {"enabled": "yes", "router-id": "172.31.255.2", "local-as": 65000}, '
-                        '"wan-b-vr": {"enabled": "no", "router-id": "172.31.255.3", "local-as": 65000}}</json>')
+BGP_SUMMARY = OK.format(
+    '<json>{"core-vr": {"enabled": "yes", "router-id": "172.31.255.1", "local-as": 65000}, '
+    '"wan-a-vr": {"enabled": "yes", "router-id": "172.31.255.2", "local-as": 65000}, '
+    '"wan-b-vr": {"enabled": "no", "router-id": "172.31.255.3", "local-as": 65000}}</json>'
+)
 
 
 def bgp_peers(lr, dns_up=True):
     import json as _json
 
     def peer(state, peer_ip, remote_as, group, accepted):
-        return {"remote-as": remote_as, "local-as": 65000, "peer-group-name": group, "state": state,
-                "local-ip": "172.31.255.1", "peer-ip": peer_ip, "status-time": 3600.0, "ipv4": True, "ipv6": False,
-                "detail": {"hostname": group, "bgpTimerUpString": "01:00:00", "lastResetDueTo": "Waiting for peer OPEN",
-                           "addressFamilyInfo": {"ipv4Unicast": {"acceptedPrefixCounter": accepted, "sentPrefixCounter": 2}}}}
+        return {
+            "remote-as": remote_as,
+            "local-as": 65000,
+            "peer-group-name": group,
+            "state": state,
+            "local-ip": "172.31.255.1",
+            "peer-ip": peer_ip,
+            "status-time": 3600.0,
+            "ipv4": True,
+            "ipv6": False,
+            "detail": {
+                "hostname": group,
+                "bgpTimerUpString": "01:00:00",
+                "lastResetDueTo": "Waiting for peer OPEN",
+                "addressFamilyInfo": {
+                    "ipv4Unicast": {"acceptedPrefixCounter": accepted, "sentPrefixCounter": 2}
+                },
+            },
+        }
+
     peers = {
         "core-vr": {
             "dns-anycast-0": peer("Established" if dns_up else "Active", "10.9.7.10", 65001, "anycast", 1),
@@ -419,6 +474,7 @@ class FakePair:
         # cmd -> "403" (role not permitted) or "error" (command failed)
         self.fail: dict[str, str] = {}
         self.tls_error = False
+        self.certs_device = CERTS_DEVICE
 
     def peer(self, host):
         return next(u for h, u in self.units.items() if h != host)
@@ -442,7 +498,7 @@ class FakePair:
             )
         if cmd.startswith("<show><interface>") and cmd != const.CMD_INTERFACE_ALL:
             self.counter_calls += 1
-            name = cmd[len("<show><interface>"):-len("</interface></show>")]
+            name = cmd[len("<show><interface>") : -len("</interface></show>")]
             n = self.counter_calls
             return parse_response(interface_detail(name, n * 7_500_000, n * 750_000))
         if cmd.startswith("<show><advanced-routing><bgp><peer><status><logical-router>"):
@@ -465,7 +521,8 @@ class FakePair:
         table = {
             const.CMD_SYSTEM_INFO: system_info(unit["hostname"], unit["serial"]),
             const.CMD_HA_STATE: ha_state(
-                unit["state"], peer["state"] if peer["up"] else "unknown",
+                unit["state"],
+                peer["state"] if peer["up"] else "unknown",
                 "up" if peer["up"] else "down",
             ),
             const.CMD_SESSION_INFO: session_info(1200),
@@ -475,7 +532,7 @@ class FakePair:
             const.CMD_GP_USERS: gp_current(self.gp_online),
             const.CMD_GP_PREVIOUS: GP_PREVIOUS,
             const.CMD_GP_CLIENT_CHECK: GP_CLIENT,
-            const.CMD_CERTS_DEVICE: CERTS_DEVICE,
+            const.CMD_CERTS_DEVICE: self.certs_device,
             const.CMD_CERTS_STORE: CERTS_STORE,
             const.CMD_ADMINS: ADMINS,
             const.CMD_IPSEC_SA: IPSEC,

@@ -1,5 +1,6 @@
+from datetime import UTC, date
+
 import pytest
-from datetime import date
 
 from custom_components.paloalto_firewall import parsers
 from custom_components.paloalto_firewall.api import parse_response
@@ -17,7 +18,9 @@ def test_ha_and_standalone():
     d = parsers.parse_ha_state(parse_response(fakefw.ha_state("active", "passive")))
     assert d["local_state"] == "active" and d["peer_conn_status"] == "up"
     assert d["running_sync"] == "synchronized"
-    assert parsers.parse_ha_state(parse_response(fakefw.OK.format("<enabled>no</enabled>"))) == {"enabled": False}
+    assert parsers.parse_ha_state(parse_response(fakefw.OK.format("<enabled>no</enabled>"))) == {
+        "enabled": False
+    }
 
 
 def test_resources_new_and_old_top():
@@ -52,7 +55,7 @@ def test_versions_and_licenses():
     assert lic["next_expiry"] == date(2026, 11, 5)
     assert lic["next_expiry_feature"] == "Threat Prevention"
     assert lic["expired"] == []  # expired warranty is ignored
-    assert all("warranty" not in l["feature"].lower() for l in lic["licenses"])
+    assert all("warranty" not in lic["feature"].lower() for lic in lic["licenses"])
 
 
 def test_lookup_parsing_and_matching():
@@ -101,11 +104,18 @@ def test_policy_match_parsing():
 def test_policy_cmd_builder():
     from custom_components.paloalto_firewall.services import POLICY_SCHEMA, build_policy_match_cmd
 
-    data = POLICY_SCHEMA({
-        "source": "10.2.4.86", "destination": "1.1.1.1", "protocol": "TCP",
-        "destination_port": "443", "from_zone": "iot", "to_zone": "untrust",
-        "application": "ssl", "source_user": "corp\\bob & co",
-    })
+    data = POLICY_SCHEMA(
+        {
+            "source": "10.2.4.86",
+            "destination": "1.1.1.1",
+            "protocol": "TCP",
+            "destination_port": "443",
+            "from_zone": "iot",
+            "to_zone": "untrust",
+            "application": "ssl",
+            "source_user": "corp\\bob & co",
+        }
+    )
     assert build_policy_match_cmd(data) == (
         "<test><security-policy-match><from>iot</from><to>untrust</to>"
         "<source>10.2.4.86</source><destination>1.1.1.1</destination>"
@@ -114,9 +124,12 @@ def test_policy_cmd_builder():
         "</security-policy-match></test>"
     )
     import voluptuous as vol
-    for bad in ({"source": "nope", "destination": "1.1.1.1"},
-                {"source": "10.0.0.1", "destination": "1.1.1.1", "protocol": "bogus"},
-                {"source": "10.0.0.1", "destination": "1.1.1.1", "destination_port": 70000}):
+
+    for bad in (
+        {"source": "nope", "destination": "1.1.1.1"},
+        {"source": "10.0.0.1", "destination": "1.1.1.1", "protocol": "bogus"},
+        {"source": "10.0.0.1", "destination": "1.1.1.1", "destination_port": 70000},
+    ):
         with pytest.raises(vol.Invalid):
             POLICY_SCHEMA(bad)
     assert POLICY_SCHEMA({"source": "10.0.0.1", "destination": "::1", "protocol": 17})["protocol"] == 17
@@ -128,22 +141,32 @@ def test_nat_text_match_and_running_nat():
     assert list(rules) == ["NPT", "NPT (#2)"]
     assert rules["NPT"]["translate_to"].startswith("src: 2001:db8:aaa:f0")
     assert parsers.nptv6_prefixes(rules["NPT (#2)"]) == {
-        "direction": "inbound", "public": "2001:db8:aaa:f0:0:0:0:0/60", "dynamic": False}
+        "direction": "inbound",
+        "public": "2001:db8:aaa:f0:0:0:0:0/60",
+        "dynamic": False,
+    }
     # Interface-address dynamic translation to a /128 is flagged.
-    dyn = {"X": {"nat_type": "nptv6", "to_interface": "ethernet1/2",
-                 "translate_to": "src: ethernet1/2 2001:db8:ffff::1(*)/128 (dynamic-ip) (pool idx: 0)"}}
-    problems, _ = parsers.nptv6_mismatches(dyn, {"name": "wan-b", "prefix": "2001:db8:b00::/56", "interface": "ethernet1/2"})
+    dyn = {
+        "X": {
+            "nat_type": "nptv6",
+            "to_interface": "ethernet1/2",
+            "translate_to": "src: ethernet1/2 2001:db8:ffff::1(*)/128 (dynamic-ip) (pool idx: 0)",
+        }
+    }
+    problems, _ = parsers.nptv6_mismatches(
+        dyn, {"name": "wan-b", "prefix": "2001:db8:b00::/56", "interface": "ethernet1/2"}
+    )
     assert problems and "/128" in problems[0]
     pools = parsers.parse_pd_pools(parse_response(fakefw.pd_pools()))
     assert pools["wan-b"]["prefix"] == "2001:db8:b00::/56" and pools["wan-a"]["state"] == "active"
 
 
 def test_firewall_utc_offset():
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     from custom_components.paloalto_firewall.parsers import firewall_utc_offset
 
-    now = datetime(2026, 10, 10, 8, 12, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 10, 10, 8, 12, 0, tzinfo=UTC)
     assert firewall_utc_offset("Sat Oct 10 04:12:47 2026", now) == -240
     assert firewall_utc_offset("Sat Oct 10 08:13:30 2026", now) == 0
     assert firewall_utc_offset("Sat Oct 10 13:42:00 2026", now) == 330
@@ -156,7 +179,9 @@ def test_gp_session_bad_timestamps():
 
     from custom_components.paloalto_firewall.parsers import parse_gp_sessions
 
-    xml = ("<result><entry><username>a</username><login-time-utc>99999999999999999</login-time-utc>"
-           "<logout-time-utc>-1</logout-time-utc></entry></result>")
+    xml = (
+        "<result><entry><username>a</username><login-time-utc>99999999999999999</login-time-utc>"
+        "<logout-time-utc>-1</logout-time-utc></entry></result>"
+    )
     s = parse_gp_sessions(ET.fromstring(xml))[0]
     assert s["login_time"] is None
