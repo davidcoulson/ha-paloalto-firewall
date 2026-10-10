@@ -48,6 +48,16 @@ CMD_PATH_MONITOR = (
     "</static-route-path-monitor></advanced-routing></show>"
 )
 CMD_JOBS = "<show><jobs><all></all></jobs></show>"
+CMD_JOB = "<show><jobs><id>{}</id></jobs></show>"
+CMD_RUNNING_CONFIG = "<show><config><running></running></config></show>"
+CMD_GP_CLIENT_DOWNLOAD = (
+    "<request><global-protect-client><software><download><version>{}</version>"
+    "</download></software></global-protect-client></request>"
+)
+CMD_GP_CLIENT_ACTIVATE = (
+    "<request><global-protect-client><software><activate><version>{}</version>"
+    "</activate></software></global-protect-client></request>"
+)
 CMD_PENDING_CHANGES = "<check><pending-changes></pending-changes></check>"
 CMD_PD_POOLS = "<show><dhcp><client><ipv6><pool-details>all</pool-details></ipv6></client></dhcp></show>"
 CMD_GP_PREVIOUS = (
@@ -82,6 +92,11 @@ PROBE_IPV4 = "1.1.1.1"
 PROBE_IPV6 = "2606:4700:4700::1111"
 
 SERVICE_CHECK_UPDATES = "check_for_updates"
+SERVICE_BACKUP_CONFIG = "backup_config"
+BACKUP_DIR = "paloalto_firewall_backups"
+BACKUP_KEEP = 30
+LICENCE_WARN_DAYS = 30
+HA_SYNC_GRACE_MINUTES = 15
 SERVICE_LOOKUP = "lookup"
 SERVICE_SESSION_LOOKUP = "session_lookup"
 SERVICE_ROUTE_LOOKUP = "route_lookup"

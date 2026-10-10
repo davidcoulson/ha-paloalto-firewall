@@ -301,6 +301,20 @@
           "description": "Only needed if more than one firewall or pair is configured."
         }
       }
+    },
+    "backup_config": {
+      "name": "Back up configuration",
+      "description": "Save each firewall's running configuration as XML in the paloalto_firewall_backups folder of your Home Assistant config, so Home Assistant backups include it. A firewall whose config hasn't changed since its last backup isn't saved again.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Firewall",
+          "description": "Only needed if more than one firewall or pair is configured."
+        },
+        "keep": {
+          "name": "Keep",
+          "description": "How many backups to keep per firewall; older ones are deleted."
+        }
+      }
     }
   },
   "selector": {
@@ -310,6 +324,28 @@
         "arp": "ARP table only",
         "dhcp": "DHCP leases only"
       }
+    }
+  },
+  "issues": {
+    "certificate_expiring": {
+      "title": "Certificate {name} expires in {days} days",
+      "description": "The certificate **{name}** on {firewall} expires on {expires}. Renew or replace it under Device > Certificate Management > Certificates, then commit."
+    },
+    "certificate_expired": {
+      "title": "Certificate {name} has expired",
+      "description": "The certificate **{name}** on {firewall} expired on {expires} ({days} days ago). Replace it, or delete it if nothing uses it any more (Device > Certificate Management > Certificates), then commit."
+    },
+    "licence_expiring": {
+      "title": "{feature} licence on {firewall} expires in {days} days",
+      "description": "The **{feature}** licence on {firewall} expires on {expires}. Renew it with Palo Alto Networks, then use Device > Licenses > Retrieve license keys from license server."
+    },
+    "licence_expired": {
+      "title": "{feature} licence on {firewall} has expired",
+      "description": "The **{feature}** licence on {firewall} expired on {expires}. Features that need it stop updating or stop working until it's renewed."
+    },
+    "ha_config_unsynced": {
+      "title": "{firewall} config is out of sync with its HA peer",
+      "description": "The running configuration on {firewall} has been {state} since {since}. A failover now would run the peer on a different config. Check Dashboard > High Availability, and use Sync to peer from the active firewall if needed."
     }
   }
 }

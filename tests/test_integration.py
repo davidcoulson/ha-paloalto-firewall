@@ -1005,3 +1005,114 @@ async def test_unique_ids_migrate_and_do_not_collide(hass: HomeAssistant, fake) 
         e.unique_id.startswith("legacy_entry_cert_fw_example_net") and e.disabled_by
         for e in er.async_entries_for_config_entry(reg, entry.entry_id)
     )
+
+
+async def test_gp_client_install(hass: HomeAssistant, fake, monkeypatch) -> None:
+    from homeassistant.exceptions import HomeAssistantError
+
+    from custom_components.paloalto_firewall import jobs
+
+    monkeypatch.setattr(jobs, "POLL_SECONDS", 0)
+    await _setup(hass, fake)
+    entity = "update.fw1_globalprotect_client"
+    assert hass.states.get(entity).attributes["supported_features"] & 1  # INSTALL
+
+    # A failed download is reported and leaves the entity ready to retry.
+    fake.job_fail = {"<request><global-protect-client><software><download>"}
+    with pytest.raises(HomeAssistantError, match="Image not found"):
+        await hass.services.async_call("update", "install", {"entity_id": entity}, blocking=True)
+    state = hass.states.get(entity)
+    assert state.attributes["in_progress"] is False
+    assert state.attributes["installed_version"] == "6.3.3-c1046"
+
+    fake.job_fail = set()
+    fake.calls.clear()
+    await hass.services.async_call("update", "install", {"entity_id": entity}, blocking=True)
+    await hass.async_block_till_done()
+    sent = [c for h, c in fake.calls if h == "fw1.lan" and ("<download>" in c or "<activate>" in c)]
+    assert [("<download>" in c, "<activate>" in c, "6.3.3-c1199" in c) for c in sent] == [
+        (True, False, True),
+        (False, True, True),
+    ]
+    state = hass.states.get(entity)
+    assert state.state == "off"
+    assert state.attributes["installed_version"] == "6.3.3-c1199"
+    # Only the firewall whose entity was installed changes.
+    assert hass.states.get("update.fw2_globalprotect_client").state == "on"
+
+
+async def test_backup_config(hass: HomeAssistant, fake, freezer, tmp_path) -> None:
+    hass.config.config_dir = str(tmp_path)
+    await _setup(hass, fake)
+    first = await hass.services.async_call(DOMAIN, "backup_config", {}, blocking=True, return_response=True)
+    folder = tmp_path / "paloalto_firewall_backups"
+    assert first["folder"] == str(folder)
+    assert set(first["firewalls"]) == {"fw1", "fw2"} and first["errors"] == {}
+    files = sorted(p.name for p in folder.iterdir())
+    assert len(files) == 2 and files[0].startswith("fw1_") and files[0].endswith(".xml")
+    text = (folder / files[0]).read_text()
+    assert text.startswith('<?xml version="1.0"?>\n<config version="11.1.0">')
+    assert "<hostname>fw1</hostname>" in text
+
+    # Unchanged config: nothing new is written.
+    freezer.tick(timedelta(hours=1))
+    again = await hass.services.async_call(DOMAIN, "backup_config", {}, blocking=True, return_response=True)
+    assert again["firewalls"]["fw1"]["unchanged"] is True
+    assert len(list(folder.iterdir())) == 2
+
+    # Changed config is saved, and keep prunes the older copy.
+    fake.units["fw1.lan"]["hostname"] = "fw1-renamed"
+    fake.units["fw2.lan"]["up"] = False
+    freezer.tick(timedelta(hours=1))
+    third = await hass.services.async_call(
+        DOMAIN, "backup_config", {"keep": 1}, blocking=True, return_response=True
+    )
+    assert "fw2" in third["errors"]
+    assert third["firewalls"]["fw1"]["unchanged"] is False
+    assert third["firewalls"]["fw1"]["pruned"] == [files[0]]
+    assert "fw1-renamed" in (folder / third["firewalls"]["fw1"]["file"].split("/")[-1]).read_text()
+
+
+async def test_repairs(hass: HomeAssistant, fake, freezer) -> None:
+    from homeassistant.helpers import issue_registry as ir
+
+    soon = (dt_util.now() + timedelta(days=20)).strftime("%B %d, %Y")
+    fake.licenses = fake.licenses.replace("November 05, 2026", soon)
+    entry = await _setup(hass, fake)
+    reg = ir.async_get(hass)
+
+    def issues() -> dict[str, ir.IssueEntry]:
+        return {
+            i.translation_key
+            + ":"
+            + str(
+                i.translation_placeholders.get("name")
+                or i.translation_placeholders.get("feature")
+                or i.translation_placeholders.get("firewall")
+            ): i
+            for (d, _), i in reg.issues.items()
+            if d == DOMAIN
+        }
+
+    found = issues()
+    assert found["certificate_expiring:fw.example.net"].severity == ir.IssueSeverity.WARNING
+    assert found["certificate_expired:old-self-signed"].severity == ir.IssueSeverity.ERROR
+    licence = found["licence_expiring:Threat Prevention"]
+    assert licence.translation_placeholders["days"] in ("19", "20")
+    assert not any(k.startswith("licence_") and "warranty" in k.lower() for k in found)
+    assert not any(k.startswith("ha_config_unsynced") for k in found)
+
+    # A brief desync (e.g. during a commit) is ignored; a lasting one is raised.
+    fake.sync = "synchronization in progress"
+    await _tick(hass, freezer, 61)
+    assert not any(k.startswith("ha_config_unsynced") for k in issues())
+    for _ in range(16):
+        await _tick(hass, freezer, 61)
+    assert "ha_config_unsynced:fw1" in issues()
+    fake.sync = "synchronized"
+    await _tick(hass, freezer, 61)
+    assert not any(k.startswith("ha_config_unsynced") for k in issues())
+
+    # Unloading the entry withdraws its issues.
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    assert issues() == {}

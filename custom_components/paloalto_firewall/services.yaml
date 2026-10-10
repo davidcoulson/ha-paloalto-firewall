@@ -235,3 +235,17 @@ check_for_updates:
       selector:
         config_entry:
           integration: paloalto_firewall
+
+backup_config:
+  fields:
+    config_entry_id:
+      selector:
+        config_entry:
+          integration: paloalto_firewall
+    keep:
+      default: 30
+      selector:
+        number:
+          min: 1
+          max: 1000
+          mode: box

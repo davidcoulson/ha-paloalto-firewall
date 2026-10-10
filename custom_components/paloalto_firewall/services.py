@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import re
+import xml.etree.ElementTree as ET
+from pathlib import Path
 from typing import Any, cast
 from xml.sax.saxutils import escape
 
@@ -12,19 +15,24 @@ from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant, ServiceCall, ServiceResponse, SupportsResponse
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import config_validation as cv
+from homeassistant.util import dt as dt_util
 
 from . import parsers
-from .api import PanOSConnectionError, PanOSError
+from .api import PanOSAuthError, PanOSConnectionError, PanOSError
 from .const import (
+    BACKUP_DIR,
+    BACKUP_KEEP,
     CMD_ARP_ALL,
     CMD_DHCP_LEASES,
     CMD_FIB,
     CMD_INTERFACE_ALL,
+    CMD_RUNNING_CONFIG,
     CMD_RUNNING_NAT,
     CMD_SESSION_FILTER,
     CMD_SESSION_ID,
     DOMAIN,
     LOOKUP_TIMEOUT,
+    SERVICE_BACKUP_CONFIG,
     SERVICE_CHECK_UPDATES,
     SERVICE_LOOKUP,
     SERVICE_ROUTE_LOOKUP,
@@ -536,6 +544,65 @@ async def _async_session_lookup(call: ServiceCall) -> ServiceResponse:
 
 CHECK_UPDATES_SCHEMA = vol.Schema({vol.Optional(ATTR_CONFIG_ENTRY_ID): cv.string})
 
+BACKUP_SCHEMA = vol.Schema(
+    {
+        vol.Optional(ATTR_CONFIG_ENTRY_ID): cv.string,
+        vol.Optional("keep", default=BACKUP_KEEP): vol.All(vol.Coerce(int), vol.Range(min=1, max=1000)),
+    }
+)
+
+
+def _write_backup(folder: Path, hostname: str, text: str, keep: int, stamp: str) -> dict[str, Any]:
+    """Save one firewall's config unless it matches its newest backup; prune old ones."""
+    folder.mkdir(parents=True, exist_ok=True)
+    base = re.sub(r"[^A-Za-z0-9._-]+", "_", hostname)
+    existing = sorted(folder.glob(f"{base}_*.xml"))
+    if existing and existing[-1].read_text(encoding="utf-8") == text:
+        target, unchanged = existing[-1], True
+    else:
+        target, unchanged = folder / f"{base}_{stamp}.xml", False
+        tmp = target.with_suffix(".tmp")
+        tmp.write_text(text, encoding="utf-8")
+        tmp.replace(target)
+        if target not in existing:
+            existing.append(target)
+    removed = []
+    for old in existing[:-keep]:
+        old.unlink(missing_ok=True)
+        removed.append(old.name)
+    return {"file": str(target), "bytes": len(text.encode()), "unchanged": unchanged, "pruned": removed}
+
+
+async def _async_backup_config(call: ServiceCall) -> ServiceResponse:
+    """Save each firewall's running config as XML under the Home Assistant config folder."""
+    hass = call.hass
+    entry = _get_entry(hass, call.data.get(ATTR_CONFIG_ENTRY_ID))
+    folder = Path(hass.config.path(BACKUP_DIR))
+    stamp = dt_util.now().strftime("%Y%m%d-%H%M%S")
+    saved: dict[str, Any] = {}
+    errors: dict[str, Any] = {}
+    for unit in entry.runtime_data.units:
+        name = unit.config.hostname
+        try:
+            result = await unit.client.op(CMD_RUNNING_CONFIG, timeout=120)
+        except PanOSAuthError as err:
+            errors[name] = f"authentication failed: {err}"
+            continue
+        except PanOSError as err:
+            errors[name] = str(err)
+            continue
+        config = result.find("config")
+        if config is None:
+            errors[name] = "the firewall returned no configuration"
+            continue
+        text = '<?xml version="1.0"?>\n' + ET.tostring(config, encoding="unicode") + "\n"
+        saved[name] = await hass.async_add_executor_job(
+            _write_backup, folder, name, text, call.data["keep"], stamp
+        )
+    if not saved:
+        raise HomeAssistantError("Config backup failed: " + "; ".join(f"{k}: {v}" for k, v in errors.items()))
+    return {"folder": str(folder), "firewalls": saved, "errors": errors} if call.return_response else None
+
 
 async def _async_check_updates(call: ServiceCall) -> ServiceResponse:
     """Run the software, content, GlobalProtect client and licence checks now."""
@@ -572,6 +639,13 @@ async def _async_check_updates(call: ServiceCall) -> ServiceResponse:
 
 
 def async_setup_services(hass: HomeAssistant) -> None:
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_BACKUP_CONFIG,
+        _async_backup_config,
+        schema=BACKUP_SCHEMA,  # type: ignore[arg-type]  # HA types schemas as probatio
+        supports_response=SupportsResponse.OPTIONAL,
+    )
     hass.services.async_register(
         DOMAIN,
         SERVICE_SESSION_LOOKUP,

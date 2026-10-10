@@ -46,6 +46,7 @@ from .network import (
     pm_key_suffix,
     safe_key,
 )
+from .repairs import PanOSRepairs, async_remove_issues
 from .services import async_setup_services
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
@@ -147,6 +148,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: PanOSConfigEntry) -> boo
     )
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    PanOSRepairs(hass, entry).async_start()
 
     # Update checks contact the update server and can take a minute; don't
     # hold up startup for them.
@@ -164,7 +166,13 @@ async def _async_options_updated(hass: HomeAssistant, entry: PanOSConfigEntry) -
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: PanOSConfigEntry) -> bool:
-    return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    if unloaded := await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
+        async_remove_issues(hass, entry.entry_id)
+    return unloaded
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: PanOSConfigEntry) -> None:
+    async_remove_issues(hass, entry.entry_id)
 
 
 def _remove_stale_network_entities(hass: HomeAssistant, entry: PanOSConfigEntry) -> None:

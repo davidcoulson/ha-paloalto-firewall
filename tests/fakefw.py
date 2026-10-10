@@ -14,10 +14,10 @@ from custom_components.paloalto_firewall.api import (
 OK = '<response status="success"><result>{}</result></response>'
 
 
-def system_info(host, serial, sw="11.1.4-h7", app="8900-9150"):
+def system_info(host, serial, sw="11.1.4-h7", app="8900-9150", gp="6.3.3-c1046"):
     return OK.format(f"""<system><hostname>{host}</hostname><ip-address>10.0.0.{serial[-1]}</ip-address>
 <uptime>12 days, 3:04:05</uptime><family>400</family><model>PA-440</model><serial>{serial}</serial>
-<sw-version>{sw}</sw-version><global-protect-client-package-version>6.3.3-c1046</global-protect-client-package-version>
+<sw-version>{sw}</sw-version><global-protect-client-package-version>{gp}</global-protect-client-package-version>
 <app-version>{app}</app-version><av-version>4950-5470</av-version><threat-version>{app}</threat-version>
 <wildfire-version>912345-916000</wildfire-version><url-filtering-version>20261007.20123</url-filtering-version>
 <logdb-version>11.1.2</logdb-version><operational-mode>normal</operational-mode>
@@ -475,6 +475,10 @@ class FakePair:
         self.fail: dict[str, str] = {}
         self.tls_error = False
         self.certs_device = CERTS_DEVICE
+        self.licenses = LICENSES
+        self.sync = "synchronized"
+        self.jobs: dict[int, tuple[str, str]] = {}  # id -> (host, cmd)
+        self.job_fail: set[str] = set()  # command prefixes whose jobs fail
 
     def peer(self, host):
         return next(u for h, u in self.units.items() if h != host)
@@ -506,6 +510,38 @@ class FakePair:
             return parse_response(bgp_peers(lr, self.dns_bgp_up))
         if cmd.startswith("<show><session><all><filter>"):
             return parse_response(SESSION_COUNT if "<count>yes</count>" in cmd else SESSIONS)
+        if cmd.startswith(
+            (
+                "<request><global-protect-client><software><download>",
+                "<request><global-protect-client><software><activate>",
+            )
+        ):
+            jid = 900 + len(self.jobs)
+            self.jobs[jid] = (host, cmd)
+            return parse_response(
+                OK.format(f"<msg><line>Job enqueued with jobid {jid}</line></msg><job>{jid}</job>")
+            )
+        if cmd.startswith("<show><jobs><id>"):
+            jid = int(cmd.split("<id>")[1].split("<")[0])
+            jhost, jcmd = self.jobs[jid]
+            failed = any(jcmd.startswith(p) for p in self.job_fail)
+            if not failed and "<activate>" in jcmd:
+                self.units[jhost]["gp"] = jcmd.split("<version>")[1].split("<")[0]
+            return parse_response(
+                OK.format(
+                    f"<job><id>{jid}</id><status>FIN</status><progress>100</progress>"
+                    f"<result>{'FAIL' if failed else 'OK'}</result>"
+                    f"<details><line>{'Image not found' if failed else 'done'}</line></details></job>"
+                )
+            )
+        if cmd == const.CMD_RUNNING_CONFIG:
+            return parse_response(
+                OK.format(
+                    '<config version="11.1.0"><devices><entry name="localhost.localdomain">'
+                    f"<deviceconfig><system><hostname>{unit['hostname']}</hostname></system>"
+                    "</deviceconfig></entry></devices></config>"
+                )
+            )
         if cmd.startswith("<show><session><id>"):
             return parse_response(SESSION_DETAIL)
         if cmd.startswith("<test><nat-policy-match>"):
@@ -519,11 +555,14 @@ class FakePair:
                 return parse_response(POLICY_DENY)
             return parse_response(POLICY_NO_MATCH if "9.9.9.9" in cmd else POLICY_MATCH)
         table = {
-            const.CMD_SYSTEM_INFO: system_info(unit["hostname"], unit["serial"]),
+            const.CMD_SYSTEM_INFO: system_info(
+                unit["hostname"], unit["serial"], gp=unit.get("gp", "6.3.3-c1046")
+            ),
             const.CMD_HA_STATE: ha_state(
                 unit["state"],
                 peer["state"] if peer["up"] else "unknown",
                 "up" if peer["up"] else "down",
+                self.sync,
             ),
             const.CMD_SESSION_INFO: session_info(1200),
             const.CMD_SYSTEM_RESOURCES: RESOURCES,
@@ -538,7 +577,7 @@ class FakePair:
             const.CMD_IPSEC_SA: IPSEC,
             const.CMD_SOFTWARE_CHECK: SOFTWARE,
             const.CMD_CONTENT_CHECK: CONTENT,
-            const.CMD_LICENSE_INFO: LICENSES,
+            const.CMD_LICENSE_INFO: self.licenses,
             const.CMD_INTERFACE_ALL: interface_all("up" if self.wan_b_up else "down"),
             const.CMD_FIB: fib(self.core_v4_via),
             const.CMD_PATH_MONITOR: path_monitor(self.wan_b_up),
