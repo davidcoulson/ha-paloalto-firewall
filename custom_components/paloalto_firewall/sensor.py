@@ -344,12 +344,7 @@ async def async_setup_entry(
             if desc.on_pair
         )
     async_add_entities(entities)
-    if entry.runtime_data.network is not None:
-        entry.async_on_unload(
-            entry.runtime_data.network.async_when_ready(
-                lambda: async_add_entities(network_sensors(entry))
-            )
-        )
+    _track_network_entities(entry, async_add_entities)
     _track_certificates(entry, async_add_entities)
 
 
@@ -795,3 +790,29 @@ class PanOSCertificateSensor(PanOSNetworkEntity, SensorEntity):
             "chain_length": cert.get("chain_length"),
             "vsys": cert.get("vsys"),
         }
+
+
+def _track_network_entities(
+    entry: PanOSConfigEntry, async_add_entities: AddConfigEntryEntitiesCallback
+) -> None:
+    """Add network entities as their data appears, not just from the first poll.
+
+    Covers a slow first poll at startup and things added on the firewall later
+    (new BGP peers, path monitors, logical routers, selected interfaces).
+    """
+    network = entry.runtime_data.network
+    if network is None:
+        return
+    added: set[str] = set()
+
+    @callback
+    def _sync() -> None:
+        if network.data is None:
+            return
+        new = [e for e in network_sensors(entry) if e.unique_id not in added]
+        if new:
+            added.update(e.unique_id for e in new)
+            async_add_entities(new)
+
+    _sync()
+    entry.async_on_unload(network.async_add_listener(_sync))

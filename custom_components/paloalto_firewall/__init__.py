@@ -115,17 +115,29 @@ async def async_setup_entry(hass: HomeAssistant, entry: PanOSConfigEntry) -> boo
     await runtime.network.async_refresh()
     lr_parent = pair_device or unit_devices[0]
 
-    @callback
-    def _network_ready() -> None:
-        _remove_stale_network_entities(hass, entry)
-        # Logical routers hang off the HA pair (or the lone firewall).
-        for lr in runtime.network.data["egress"]:
-            ensure_device(
-                hass, entry, (DOMAIN, lr_identifier(entry.entry_id, lr)), lr_parent,
-                name=lr, **LR_DEVICE_FIELDS,
-            )
+    lr_devices: set[str] = set()
 
-    entry.async_on_unload(runtime.network.async_when_ready(_network_ready))
+    @callback
+    def _sync_lr_devices() -> None:
+        # Logical routers hang off the HA pair (or the lone firewall). Runs on
+        # every poll (before the platforms' listeners) so routers that appear
+        # later get a device before their entities are added.
+        if runtime.network.data is None:
+            return
+        for lr in runtime.network.data["egress"]:
+            if lr not in lr_devices:
+                lr_devices.add(lr)
+                ensure_device(
+                    hass, entry, (DOMAIN, lr_identifier(entry.entry_id, lr)), lr_parent,
+                    name=lr, **LR_DEVICE_FIELDS,
+                )
+
+    _sync_lr_devices()
+    entry.async_on_unload(runtime.network.async_add_listener(_sync_lr_devices))
+    # Stale-entity cleanup once, from the first poll that has data.
+    entry.async_on_unload(
+        runtime.network.async_when_ready(lambda: _remove_stale_network_entities(hass, entry))
+    )
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
@@ -158,9 +170,15 @@ def _remove_stale_network_entities(hass: HomeAssistant, entry: PanOSConfigEntry)
     # Interface entities: exact ids, and only prune auto-selected interfaces
     # when the reads that drive auto-selection (FIB, path monitors) worked.
     prefix = f"{entry.entry_id}_if_"
+    # Configured interfaces are kept even if a poll didn't list them.
+    wanted = (
+        network.configured_interfaces
+        if network.configured_interfaces is not None
+        else network.selected_interfaces(data)
+    )
     if_keep = {
         f"{prefix}{name.replace('/', '_').replace('.', '_')}_{suffix}"
-        for name in network.selected_interfaces(data)
+        for name in wanted
         for suffix in ("link", "in", "out", "speed")
     }
     prune_ifs = network.configured_interfaces is not None or (

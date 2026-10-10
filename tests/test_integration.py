@@ -780,3 +780,17 @@ async def test_subinterface_entities_cleaned_up_exactly(hass: HomeAssistant, fak
     await hass.async_block_till_done(wait_background_tasks=True)
     assert reg.async_get(stale.entity_id) is None
     assert reg.async_get("sensor.edge_ha_pair_ethernet1_1_in") is not None
+
+
+async def test_late_path_monitors_and_peers_get_entities(hass: HomeAssistant, fake, freezer) -> None:
+    from custom_components.paloalto_firewall import const
+
+    pm = "binary_sensor.wan_b_vr_path_monitor_ethernet1_2_via_203_0_113_1"
+    peer = "binary_sensor.core_vr_bgp_dns_anycast_0"
+    fake.fail = {const.CMD_PATH_MONITOR: "error", const.CMD_BGP_SUMMARY: "error"}
+    await _setup(hass, fake)
+    assert hass.states.get(pm) is None and hass.states.get(peer) is None
+    fake.fail = {}
+    await _tick(hass, freezer, 301)
+    assert hass.states.get(pm).state == "on"
+    assert hass.states.get(peer).state == "on"
