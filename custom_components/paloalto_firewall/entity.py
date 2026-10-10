@@ -17,6 +17,7 @@ from .coordinator import (
     PanOSUpdatesCoordinator,
     unit_device_info,
 )
+from .network import PanOSNetworkCoordinator, parent_identifier
 
 
 class PanOSUnitEntity(CoordinatorEntity[PanOSDeviceCoordinator]):
@@ -91,3 +92,29 @@ class PanOSPairEntity(Entity):
     @property
     def available(self) -> bool:
         return self.pair.any_available
+
+
+class PanOSNetworkEntity(CoordinatorEntity[PanOSNetworkCoordinator]):
+    """Pair-wide network entity (data read from the active firewall)."""
+
+    _attr_has_entity_name = True
+
+    def __init__(
+        self,
+        entry: PanOSConfigEntry,
+        key: str,
+        device_info: DeviceInfo | None = None,
+    ) -> None:
+        super().__init__(entry.runtime_data.network)
+        self._attr_unique_id = f"{entry.entry_id}_{key}"
+        self._attr_device_info = device_info or DeviceInfo(
+            identifiers={parent_identifier(entry)}
+        )
+
+    @property
+    def data(self) -> dict:
+        return self.coordinator.data or {}
+
+    @property
+    def available(self) -> bool:
+        return super().available and self.coordinator.data is not None

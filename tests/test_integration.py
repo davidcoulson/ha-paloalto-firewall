@@ -272,7 +272,7 @@ async def test_security_policy_action(hass: HomeAssistant, fake) -> None:
     assert result["matched"] is True
     assert result["rule"] == "IoT-to-Internet" and result["action"] == "allow"
     assert result["criteria"]["protocol"] == 6
-    assert [h for h, _ in fake.calls] == ["fw1.lan"]
+    assert {h for h, _ in fake.calls} == {"fw1.lan"}
 
     result = await hass.services.async_call(
         DOMAIN, "test_security_policy", {"source": "10.2.4.86", "destination": "9.9.9.9"},
@@ -286,3 +286,131 @@ async def test_security_policy_action(hass: HomeAssistant, fake) -> None:
             {"source": "10.2.4.86", "destination": "1.1.1.1", "from_zone": "bogus"},
             blocking=True, return_response=True,
         )
+
+
+async def test_network_entities_and_egress_change(hass: HomeAssistant, fake) -> None:
+    from homeassistant.helpers import device_registry as dr
+
+    entry = await _setup(hass, fake)
+    st = hass.states.get
+    network = entry.runtime_data.network
+    assert network.selected_interfaces(network.data) == ["ae9.100", "ae9.101", "ethernet1/1", "ethernet1/2"]
+
+    assert st("sensor.edge_ha_pair_running_jobs").state == "1"
+    assert st("binary_sensor.edge_ha_pair_uncommitted_changes").state == "on"
+    assert st("sensor.edge_ha_pair_last_commit").attributes["user"] == "admin"
+    assert st("binary_sensor.edge_ha_pair_ethernet1_2_link").state == "on"
+    assert st("sensor.edge_ha_pair_ethernet1_1_link_speed").state == "10000"
+    assert st("sensor.edge_ha_pair_ethernet1_1_in").state == "unknown"  # needs two samples
+
+    egress = st("sensor.core_vr_internet_egress")
+    assert egress.state == "WanB"
+    assert egress.attributes["interface"] == "ae9.101" and egress.attributes["vsys"] == "vsys1"
+    assert st("sensor.core_vr_ipv6_internet_egress").state == "WanA"
+    assert st("sensor.wan_b_vr_internet_egress").state == "Internet"
+    pm = st("binary_sensor.wan_b_vr_path_monitor_ethernet1_2_via_203_0_113_1")
+    assert pm.state == "on"
+    assert st("binary_sensor.core_vr_path_monitor_ae9_101_via_fd00_99_b_1").state == "off"
+
+    reg = dr.async_get(hass)
+    lr_dev = reg.async_get_device(identifiers={(DOMAIN, f"{entry.entry_id}_lr_core-vr")})
+    pair_dev = reg.async_get_device(identifiers={(DOMAIN, f"{entry.entry_id}_ha_pair")})
+    assert lr_dev.via_device_id == pair_dev.id
+
+    # Next poll: throughput appears; then WAN B fails and core-vr moves to WAN A.
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=61))
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert float(st("sensor.edge_ha_pair_ethernet1_1_in").state) > 0
+
+    events = async_capture_events(hass, "paloalto_firewall_egress_change")
+    fake.core_v4_via = "a"
+    fake.wan_b_up = False
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=130))
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert st("sensor.core_vr_internet_egress").state == "WanA"
+    assert st("binary_sensor.wan_b_vr_path_monitor_ethernet1_2_via_203_0_113_1").state == "off"
+    assert st("binary_sensor.edge_ha_pair_ethernet1_2_link").state == "off"
+    ev = [e.data for e in events if e.data["logical_router"] == "core-vr"]
+    assert ev == [{
+        "entry_id": entry.entry_id, "logical_router": "core-vr", "family": "ipv4",
+        "previous_interface": "ae9.101", "previous_zone": "WanB",
+        "interface": "ae9.100", "zone": "WanA", "nexthop": "172.31.0.2",
+    }]
+
+
+async def test_route_lookup_and_inferred_policy_tests(hass: HomeAssistant, fake) -> None:
+    from homeassistant.exceptions import ServiceValidationError
+
+    await _setup(hass, fake)
+
+    async def call(service, data):
+        return await hass.services.async_call(DOMAIN, service, data, blocking=True, return_response=True)
+
+    r = await call("route_lookup", {"destination": "1.1.1.1"})
+    assert [x["logical_router"] for x in r["results"]] == ["core-vr", "wan-a-vr", "wan-b-vr"]
+    assert r["results"][0]["paths"][0] == {
+        "interface": "ae9.101", "nexthop": "172.31.0.6", "zone": "WanB", "vsys": "vsys1", "drop": False
+    }
+    r = await call("route_lookup", {"destination": "10.9.99.9", "source": "10.9.20.50"})
+    assert r["searched"].startswith("source 10.9.20.50 (ae1.20)")
+    assert r["results"] == [{"logical_router": "core-vr", "route": "10.9.0.0/16",
+                             "paths": [{"interface": None, "nexthop": "drop", "zone": None, "vsys": None, "drop": True}]}]
+    r = await call("route_lookup", {"destination": "1.1.1.1", "logical_router": "wan-a-vr"})
+    assert r["results"][0]["paths"][0]["interface"] == "ethernet1/1"
+    with pytest.raises(ServiceValidationError):
+        await call("route_lookup", {"destination": "1.1.1.1", "logical_router": "nope"})
+
+    fake.vsys_calls.clear()
+    r = await call("test_security_policy", {"source": "10.9.20.50", "destination": "1.1.1.1", "destination_port": 443})
+    assert r["inferred"] == {"vsys": "vsys1", "from_zone": "IoT", "to_zone": "WanB"}
+    assert r["path"]["egress_interface"] == "ae9.101"
+    cmd, vsys = fake.vsys_calls[-1]
+    assert vsys == "vsys1" and "<from>IoT</from><to>WanB</to>" in cmd
+
+    # Explicit values win over inference.
+    r = await call("test_security_policy", {"source": "10.9.20.50", "destination": "1.1.1.1",
+                                            "from_zone": "Trusted", "to_zone": "WanA", "vsys": "vsys1"})
+    assert r["inferred"] == {}
+    assert "<from>Trusted</from><to>WanA</to>" in fake.vsys_calls[-1][0]
+
+    r = await call("test_nat_policy", {"source": "10.9.20.50", "destination": "1.1.1.1", "destination_port": 443})
+    assert r["rule"] == "IoT-Hide-NAT"
+    assert r["inferred"]["to_interface"] == "ae9.101"
+    assert "<to-interface>ae9.101</to-interface>" in fake.vsys_calls[-1][0]
+
+
+async def test_standalone_network_entities(hass: HomeAssistant, fake) -> None:
+    from homeassistant.helpers import device_registry as dr
+
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_NAME: "Edge", CONF_USERNAME: "u", CONF_PASSWORD: "p", CONF_VERIFY_SSL: False,
+            CONF_UNITS: [{"host": "fw1.lan", "serial": "0123456789001", "hostname": "fw1", "model": None}],
+        },
+    )
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert hass.states.get("sensor.fw1_running_jobs").state == "1"
+    assert hass.states.get("sensor.core_vr_internet_egress").state == "WanB"
+    reg = dr.async_get(hass)
+    lr_dev = reg.async_get_device(identifiers={(DOMAIN, f"{entry.entry_id}_lr_core-vr")})
+    fw_dev = reg.async_get_device(identifiers={(DOMAIN, "0123456789001")})
+    assert lr_dev.via_device_id == fw_dev.id
+
+
+async def test_options_interface_selection(hass: HomeAssistant, fake) -> None:
+    entry = await _setup(hass, fake)
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    schema_keys = [str(k) for k in result["data_schema"].schema]
+    assert "interfaces" in schema_keys
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"scan_interval": 60, "update_check_hours": 6, "interfaces": ["ae1.20"]}
+    )
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert entry.options["interfaces"] == ["ae1.20"]
+    assert hass.states.get("sensor.edge_ha_pair_ae1_20_in") is not None
+    assert hass.states.get("binary_sensor.edge_ha_pair_ae1_20_link").state == "on"
+    from homeassistant.helpers import entity_registry as er
+    assert er.async_get(hass).async_get("sensor.edge_ha_pair_ethernet1_1_in") is None

@@ -9,11 +9,13 @@ from homeassistant.const import CONF_NAME, CONF_PASSWORD, CONF_USERNAME, CONF_VE
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.helpers import config_validation as cv, device_registry as dr
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.typing import ConfigType
 
 from .api import PanOSClient
 from .const import (
+    CONF_INTERFACES,
     CONF_SCAN_INTERVAL,
     CONF_UNITS,
     CONF_UPDATE_INTERVAL,
@@ -33,6 +35,7 @@ from .coordinator import (
     PanOSUpdatesCoordinator,
     UnitConfig,
 )
+from .network import PanOSNetworkCoordinator
 from .services import async_setup_services
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
@@ -94,6 +97,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: PanOSConfigEntry) -> boo
         runtime.pair.async_start()
     entry.runtime_data = runtime
 
+    runtime.network = PanOSNetworkCoordinator(
+        hass, entry, scan, entry.options.get(CONF_INTERFACES)
+    )
+    # Not fatal: logical-router and interface entities are skipped (until the
+    # next reload) if the routing/interface commands can't be read yet.
+    await runtime.network.async_refresh()
+    _remove_deselected_interface_entities(hass, entry)
+
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     # Update checks contact the update server and can take a minute; don't
@@ -113,3 +124,20 @@ async def _async_options_updated(hass: HomeAssistant, entry: PanOSConfigEntry) -
 
 async def async_unload_entry(hass: HomeAssistant, entry: PanOSConfigEntry) -> bool:
     return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+
+
+def _remove_deselected_interface_entities(hass: HomeAssistant, entry: PanOSConfigEntry) -> None:
+    """Drop entities for interfaces no longer selected in the options."""
+    network = entry.runtime_data.network
+    if network.data is None:
+        return
+    keep = {
+        f"{entry.entry_id}_if_{name.replace('/', '_').replace('.', '_')}_"
+        for name in network.selected_interfaces(network.data)
+    }
+    prefix = f"{entry.entry_id}_if_"
+    registry = er.async_get(hass)
+    for ent in er.async_entries_for_config_entry(registry, entry.entry_id):
+        uid = ent.unique_id
+        if uid.startswith(prefix) and not any(uid.startswith(k) for k in keep):
+            registry.async_remove(ent.entity_id)

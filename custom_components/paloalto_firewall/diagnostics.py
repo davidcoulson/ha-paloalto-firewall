@@ -11,7 +11,10 @@ from homeassistant.core import HomeAssistant
 from . import probes
 from .coordinator import PanOSConfigEntry
 
-TO_REDACT = {CONF_PASSWORD, CONF_USERNAME, "users", "admins", "mgmt_ip", "peer_mgmt_ip"}
+TO_REDACT = {
+    CONF_PASSWORD, CONF_USERNAME, "users", "admins", "mgmt_ip", "peer_mgmt_ip",
+    "ips", "nexthop", "monitors",
+}
 
 
 async def async_get_config_entry_diagnostics(
@@ -37,6 +40,18 @@ async def async_get_config_entry_diagnostics(
                 }
                 for u in runtime.units
             ],
+            "network": None
+            if not runtime.network or not runtime.network.data
+            else {
+                "unit": runtime.network.data["unit"],
+                "selected_interfaces": runtime.network.selected_interfaces(runtime.network.data),
+                "egress": runtime.network.data["egress"],
+                "path_groups": runtime.network.data["path_groups"],
+                "pending_changes": runtime.network.data["pending_changes"],
+                "running_jobs": (runtime.network.data["jobs"] or {}).get("running"),
+                "interface_count": len(runtime.network.data["interfaces"]),
+                "fib_entries": len(runtime.network.data["fib"]),
+            },
             "pair": None
             if pair is None
             else {

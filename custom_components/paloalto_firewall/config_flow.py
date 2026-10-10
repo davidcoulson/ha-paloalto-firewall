@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Mapping
 from typing import Any
 
@@ -16,6 +17,9 @@ from homeassistant.helpers.selector import (
     NumberSelector,
     NumberSelectorConfig,
     NumberSelectorMode,
+    SelectSelector,
+    SelectSelectorConfig,
+    SelectSelectorMode,
     TextSelector,
     TextSelectorConfig,
     TextSelectorType,
@@ -26,6 +30,7 @@ from .api import PanOSAuthError, PanOSClient, PanOSError
 from .const import (
     CMD_HA_STATE,
     CMD_SYSTEM_INFO,
+    CONF_INTERFACES,
     CONF_PRIMARY_HOST,
     CONF_SCAN_INTERVAL,
     CONF_SECONDARY_HOST,
@@ -217,14 +222,37 @@ class PanOSConfigFlow(ConfigFlow, domain=DOMAIN):
 
 class PanOSOptionsFlow(OptionsFlow):
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
-        if user_input is not None:
-            return self.async_create_entry(
-                data={
-                    CONF_SCAN_INTERVAL: int(user_input[CONF_SCAN_INTERVAL]),
-                    CONF_UPDATE_INTERVAL: int(user_input[CONF_UPDATE_INTERVAL]),
-                }
+        network = getattr(getattr(self.config_entry, "runtime_data", None), "network", None)
+        available: list[str] = []
+        current: list[str] = []
+        if network is not None and network.data is not None:
+            available = sorted(
+                (
+                    name
+                    for name, i in network.data["interfaces"].items()
+                    if i.get("zone") or i.get("logical_router")
+                ),
+                key=_iface_sort_key,
             )
+            current = network.selected_interfaces(network.data)
+        if user_input is not None:
+            options = {
+                CONF_SCAN_INTERVAL: int(user_input[CONF_SCAN_INTERVAL]),
+                CONF_UPDATE_INTERVAL: int(user_input[CONF_UPDATE_INTERVAL]),
+            }
+            if CONF_INTERFACES in user_input:
+                options[CONF_INTERFACES] = list(user_input[CONF_INTERFACES])
+            elif CONF_INTERFACES in self.config_entry.options:
+                options[CONF_INTERFACES] = self.config_entry.options[CONF_INTERFACES]
+            return self.async_create_entry(data=options)
         options = self.config_entry.options
+        extra: dict = {}
+        if available:
+            extra[vol.Optional(CONF_INTERFACES, default=current)] = SelectSelector(
+                SelectSelectorConfig(
+                    options=available, multiple=True, mode=SelectSelectorMode.DROPDOWN
+                )
+            )
         return self.async_show_form(
             step_id="init",
             data_schema=vol.Schema(
@@ -249,6 +277,11 @@ class PanOSOptionsFlow(OptionsFlow):
                             min=1, max=168, step=1, unit_of_measurement="h", mode=NumberSelectorMode.BOX
                         )
                     ),
+                    **extra,
                 }
             ),
         )
+
+
+def _iface_sort_key(name: str) -> tuple:
+    return tuple(int(p) if p.isdigit() else p for p in re.split(r"(\d+)", name))

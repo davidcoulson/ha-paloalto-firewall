@@ -21,7 +21,8 @@ from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN
 from .coordinator import PanOSConfigEntry
-from .entity import PanOSPairEntity, PanOSUnitEntity, PanOSUpdatesEntity
+from .entity import PanOSNetworkEntity, PanOSPairEntity, PanOSUnitEntity, PanOSUpdatesEntity
+from .network import lr_device_info
 from .parsers import HA_STATES
 
 Data = dict[str, Any]
@@ -342,6 +343,7 @@ async def async_setup_entry(
             for desc in UNIT_SENSORS
             if desc.on_pair
         )
+    entities.extend(network_sensors(entry))
     async_add_entities(entities)
 
 
@@ -440,3 +442,200 @@ class PanOSLastFailoverSensor(PanOSPairEntity, RestoreSensor):
     @property
     def native_value(self) -> datetime | None:
         return self.pair.last_failover
+
+
+# --------------------------------------------------------------------------
+# Pair-wide network sensors (interfaces, logical routers, jobs)
+# --------------------------------------------------------------------------
+
+
+def network_sensors(entry: PanOSConfigEntry) -> list[SensorEntity]:
+    network = entry.runtime_data.network
+    if network is None or network.data is None:
+        return []
+    data = network.data
+    entities: list[SensorEntity] = [PanOSRunningJobsSensor(entry), PanOSLastCommitSensor(entry)]
+    for name in network.selected_interfaces(data):
+        safe = name.replace("/", "_").replace(".", "_")
+        for direction in ("in", "out"):
+            entities.append(PanOSInterfaceRateSensor(entry, name, safe, direction))
+        if data["interfaces"][name].get("speed"):
+            entities.append(PanOSInterfaceSpeedSensor(entry, name, safe))
+    for lr in data["egress"]:
+        device = lr_device_info(entry, lr)
+        entities.append(PanOSEgressSensor(entry, lr, "ipv4", device))
+        entities.append(PanOSEgressSensor(entry, lr, "ipv6", device))
+        entities.append(PanOSRouteCountSensor(entry, lr, device))
+    return entities
+
+
+class PanOSRunningJobsSensor(PanOSNetworkEntity, SensorEntity):
+    _attr_name = "Running jobs"
+    _attr_icon = "mdi:progress-clock"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+
+    def __init__(self, entry: PanOSConfigEntry) -> None:
+        super().__init__(entry, "running_jobs")
+
+    @property
+    def available(self) -> bool:
+        return super().available and self.data.get("jobs") is not None
+
+    @property
+    def native_value(self) -> int:
+        return len(self.data["jobs"]["running"])
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        return {
+            "jobs": [
+                {k: j[k] for k in ("id", "type", "user", "status", "progress")}
+                for j in self.data["jobs"]["running"]
+            ],
+            "firewall": self.data.get("unit"),
+        }
+
+
+class PanOSLastCommitSensor(PanOSNetworkEntity, SensorEntity):
+    """Most recent commit in the firewall's job history (unknown once it ages out)."""
+
+    _attr_name = "Last commit"
+    _attr_icon = "mdi:source-commit"
+    _attr_device_class = SensorDeviceClass.TIMESTAMP
+
+    def __init__(self, entry: PanOSConfigEntry) -> None:
+        super().__init__(entry, "last_commit")
+        self._last: tuple[datetime, dict[str, Any]] | None = None
+
+    @property
+    def available(self) -> bool:
+        return super().available and self.data.get("jobs") is not None
+
+    def _current(self) -> tuple[datetime, dict[str, Any]] | None:
+        jobs = self.data.get("jobs") or {}
+        if (when := jobs.get("last_commit_time")) and jobs.get("last_commit"):
+            when = when.replace(tzinfo=dt_util.DEFAULT_TIME_ZONE)
+            if self._last is None or when >= self._last[0]:
+                self._last = (when, jobs["last_commit"])
+        return self._last
+
+    @property
+    def native_value(self) -> datetime | None:
+        cur = self._current()
+        return cur[0] if cur else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        cur = self._current()
+        if not cur:
+            return None
+        job = cur[1]
+        return {"user": job["user"], "job_id": job["id"], "result": job["result"], "type": job["type"]}
+
+
+class PanOSInterfaceRateSensor(PanOSNetworkEntity, SensorEntity):
+    _attr_device_class = SensorDeviceClass.DATA_RATE
+    _attr_native_unit_of_measurement = UnitOfDataRate.KILOBITS_PER_SECOND
+    _attr_suggested_unit_of_measurement = UnitOfDataRate.MEGABITS_PER_SECOND
+    _attr_suggested_display_precision = 1
+    _attr_state_class = SensorStateClass.MEASUREMENT
+
+    def __init__(self, entry, name: str, safe: str, direction: str) -> None:
+        super().__init__(entry, f"if_{safe}_{direction}")
+        self._if = name
+        self._key = f"{direction}_kbps"
+        self._attr_name = f"{name} {direction}"
+        self._attr_icon = "mdi:download-network" if direction == "in" else "mdi:upload-network"
+
+    @property
+    def native_value(self) -> float | None:
+        return (self.data.get("counters", {}).get(self._if) or {}).get(self._key)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        iface = self.data.get("interfaces", {}).get(self._if, {})
+        return {
+            "zone": iface.get("zone"),
+            "vsys": iface.get("vsys"),
+            "logical_router": iface.get("logical_router"),
+            "addresses": iface.get("ips"),
+            "firewall": self.data.get("unit"),
+        }
+
+
+class PanOSInterfaceSpeedSensor(PanOSNetworkEntity, SensorEntity):
+    _attr_device_class = SensorDeviceClass.DATA_RATE
+    _attr_native_unit_of_measurement = UnitOfDataRate.MEGABITS_PER_SECOND
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, entry, name: str, safe: str) -> None:
+        super().__init__(entry, f"if_{safe}_speed")
+        self._if = name
+        self._attr_name = f"{name} link speed"
+
+    @property
+    def native_value(self) -> int | None:
+        return self.data.get("interfaces", {}).get(self._if, {}).get("speed")
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        return {"duplex": self.data.get("interfaces", {}).get(self._if, {}).get("duplex")}
+
+
+class PanOSEgressSensor(PanOSNetworkEntity, SensorEntity):
+    """Where this logical router sends internet traffic (FIB lookup of an anycast IP)."""
+
+    _attr_icon = "mdi:routes"
+
+    def __init__(self, entry, lr: str, family: str, device) -> None:
+        super().__init__(entry, f"lr_{lr}_egress_{family}", device)
+        self._lr = lr
+        self._family = family
+        self._attr_name = "Internet egress" if family == "ipv4" else "IPv6 internet egress"
+
+    def _info(self) -> dict[str, Any] | None:
+        return self.data.get("egress", {}).get(self._lr, {}).get(self._family)
+
+    @property
+    def native_value(self) -> str | None:
+        info = self._info()
+        if not info:
+            return None
+        if info["drop"]:
+            return "drop"
+        return info["zone"] or info["interface"]
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        info = self._info()
+        if not info:
+            return None
+        return {
+            "interface": info["interface"],
+            "nexthop": info["nexthop"],
+            "vsys": info["vsys"],
+            "route": info["prefix"],
+            "paths": info["paths"],
+            "firewall": self.data.get("unit"),
+        }
+
+
+class PanOSRouteCountSensor(PanOSNetworkEntity, SensorEntity):
+    _attr_name = "FIB routes"
+    _attr_icon = "mdi:table-network"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, entry, lr: str, device) -> None:
+        super().__init__(entry, f"lr_{lr}_routes", device)
+        self._lr = lr
+
+    @property
+    def native_value(self) -> int | None:
+        info = self.data.get("egress", {}).get(self._lr)
+        return info["routes_ipv4"] + info["routes_ipv6"] if info else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        info = self.data.get("egress", {}).get(self._lr)
+        return {"ipv4": info["routes_ipv4"], "ipv6": info["routes_ipv6"]} if info else None

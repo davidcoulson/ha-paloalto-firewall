@@ -616,3 +616,200 @@ def parse_policy_match(result: ET.Element) -> list[dict[str, Any]]:
         elif entry.text and (match := _RULE_TEXT_RE.match(entry.text.strip())):
             rules.append({"name": match["name"].strip(), "index": int(match["index"])})
     return rules
+
+
+# --------------------------------------------------------------------------
+# Interfaces, FIB, path monitoring, jobs (Advanced Routing Engine)
+# --------------------------------------------------------------------------
+
+
+def _vsys_name(value: str | None) -> str | None:
+    if not value or value in ("0", "N/A"):
+        return None
+    return value if value.startswith("vsys") else f"vsys{value}"
+
+
+def parse_interfaces(result: ET.Element) -> dict[str, dict[str, Any]]:
+    """'show interface all' -> {name: {...}} for hardware and logical interfaces."""
+    hw: dict[str, dict[str, Any]] = {}
+    for e in result.findall("hw/entry"):
+        name = _text(e, "name")
+        if name:
+            hw[name] = {
+                "state": _text(e, "state"),
+                "speed": _int(_text(e, "speed")),
+                "duplex": _text(e, "duplex") if _text(e, "duplex") != "[n/a]" else None,
+                "mac": _text(e, "mac"),
+            }
+    interfaces: dict[str, dict[str, Any]] = {}
+    for e in result.findall("ifnet/entry"):
+        name = _text(e, "name")
+        if not name:
+            continue
+        fwd = _text(e, "fwd") or ""
+        ips = []
+        for field in ("ip", "dyn-addr", "addr6"):
+            for value in (_text(e, field) or "").replace(",", " ").split():
+                if value != "N/A" and "/" in value:
+                    ips.append(value)
+        for m in e.findall("addr6/member") + e.findall("addr/member"):
+            if m.text and "/" in m.text:
+                ips.append(m.text.strip())
+        base = hw.get(name.split(".")[0], {})
+        interfaces[name] = {
+            "name": name,
+            "vsys": _vsys_name(_text(e, "vsys")),
+            "zone": _text(e, "zone"),
+            "logical_router": fwd[3:] if fwd.startswith("lr:") else None,
+            "forwarding": fwd or None,
+            "tag": _int(_text(e, "tag")),
+            "ips": ips,
+            "state": base.get("state"),
+            "speed": base.get("speed"),
+            "duplex": base.get("duplex"),
+        }
+    for name, data in hw.items():
+        interfaces.setdefault(
+            name,
+            {"name": name, "vsys": None, "zone": None, "logical_router": None,
+             "forwarding": None, "tag": 0, "ips": [], **data},
+        )
+    return interfaces
+
+
+def parse_interface_counters(result: ET.Element) -> dict[str, Any]:
+    """'show interface <name>' -> byte/packet/error counters."""
+    counters = result.find("ifnet/counters")
+    if counters is None:
+        raise ValueError("No counters in interface response")
+    # Prefer hardware counters for physical/aggregate ports, logical for sub-ifs.
+    entry = counters.find("hw/entry")
+    if entry is None or _int(_text(entry, "ibytes")) is None:
+        entry = counters.find("ifnet/entry")
+    if entry is None:
+        raise ValueError("No counter entry in interface response")
+    return {
+        k: _int(_text(entry, k))
+        for k in ("ibytes", "obytes", "ipackets", "opackets", "ierrors", "idrops")
+    }
+
+
+def parse_fib(result: ET.Element) -> list[dict[str, Any]]:
+    routes = []
+    for table in result.findall("fibs/entry"):
+        vr = _text(table, "vr")
+        for e in table.findall("entries/entry"):
+            dst = _text(e, "dst")
+            if not vr or not dst:
+                continue
+            try:
+                network = ipaddress.ip_network(dst, strict=False)
+            except ValueError:
+                continue
+            nexthop = _text(e, "nexthop")
+            flags = _text(e, "flags") or ""
+            routes.append(
+                {
+                    "logical_router": vr,
+                    "destination": str(network),
+                    "interface": _text(e, "interface"),
+                    "nexthop": None if nexthop in ("0.0.0.0", "::") else nexthop,
+                    "flags": flags,
+                    "drop": nexthop == "drop",
+                    "version": network.version,
+                }
+            )
+    return routes
+
+
+def fib_lookup(
+    routes: list[dict[str, Any]], logical_router: str, address: str
+) -> list[dict[str, Any]]:
+    """Longest-prefix match in one logical router's FIB (all ECMP paths)."""
+    ip = ipaddress.ip_address(address)
+    best: list[dict[str, Any]] = []
+    best_len = -1
+    for r in routes:
+        if r["logical_router"] != logical_router or r["version"] != ip.version:
+            continue
+        net = ipaddress.ip_network(r["destination"])
+        if ip not in net:
+            continue
+        if not r["flags"].startswith("u"):
+            continue
+        if net.prefixlen > best_len:
+            best, best_len = [r], net.prefixlen
+        elif net.prefixlen == best_len:
+            best.append(r)
+    return [dict(r) for r in best]
+
+
+def parse_path_monitor(result: ET.Element) -> list[dict[str, Any]]:
+    entries = []
+    for e in result.findall("entry"):
+        monitors = []
+        i = 0
+        while (dst := _text(e, f"monitordst-{i}")) is not None:
+            monitors.append(
+                {
+                    "destination": dst,
+                    "status": _text(e, f"monitorstatus-{i}"),
+                    "interval_count": _text(e, f"interval-count-{i}"),
+                }
+            )
+            i += 1
+        entries.append(
+            {
+                "destination": _text(e, "destination"),
+                "nexthop": _text(e, "nexthop"),
+                "interface": _text(e, "interface"),
+                "metric": _int(_text(e, "metric")),
+                "condition": _text(e, "pathmonitor-cond"),
+                "up": (_text(e, "pathmonitor-status") or "").lower() == "up",
+                "monitors": monitors,
+            }
+        )
+    return entries
+
+
+def _job_time(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.strptime(value.strip(), "%Y/%m/%d %H:%M:%S")
+    except ValueError:
+        return None
+
+
+def parse_jobs(result: ET.Element) -> dict[str, Any]:
+    jobs = []
+    for e in result.findall("job"):
+        jobs.append(
+            {
+                "id": _int(_text(e, "id")),
+                "type": _text(e, "type"),
+                "user": _text(e, "user"),
+                "status": _text(e, "status"),
+                "result": _text(e, "result"),
+                "progress": _text(e, "progress"),
+                "queued": _text(e, "tenq"),
+                "finished": _text(e, "tfin"),
+                "description": _text(e, "description"),
+            }
+        )
+    running = [j for j in jobs if j["status"] in ("ACT", "PEND")]
+    commits = [
+        j for j in jobs
+        if (j["type"] or "").lower() in ("commit", "commitall", "commit-all") and j["status"] == "FIN"
+    ]
+    last_commit = max(commits, key=lambda j: j["id"] or 0) if commits else None
+    return {
+        "running": running,
+        "last_commit": last_commit,
+        "last_commit_time": _job_time(last_commit["finished"]) if last_commit else None,
+        "total": len(jobs),
+    }
+
+
+def parse_pending_changes(result: ET.Element) -> bool:
+    return (result.text or "").strip().lower() == "yes"

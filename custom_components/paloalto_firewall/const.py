@@ -46,7 +46,24 @@ CMD_DHCP_LEASES = (
     "<show><dhcp><server><lease><interface>all</interface></lease></server></dhcp></show>"
 )
 
+CMD_INTERFACE_ALL = "<show><interface>all</interface></show>"
+CMD_FIB = "<show><advanced-routing><fib></fib></advanced-routing></show>"
+CMD_PATH_MONITOR = (
+    "<show><advanced-routing><static-route-path-monitor>"
+    "</static-route-path-monitor></advanced-routing></show>"
+)
+CMD_JOBS = "<show><jobs><all></all></jobs></show>"
+CMD_PENDING_CHANGES = "<check><pending-changes></pending-changes></check>"
+
+CONF_INTERFACES = "interfaces"
+EVENT_EGRESS_CHANGE = f"{DOMAIN}_egress_change"
+# Well-known anycast addresses used to find each logical router's internet path.
+PROBE_IPV4 = "1.1.1.1"
+PROBE_IPV6 = "2606:4700:4700::1111"
+
 SERVICE_LOOKUP = "lookup"
+SERVICE_ROUTE_LOOKUP = "route_lookup"
+SERVICE_TEST_NAT_POLICY = "test_nat_policy"
 SERVICE_TEST_SECURITY_POLICY = "test_security_policy"
 LOOKUP_TIMEOUT = 60
 
@@ -55,3 +72,7 @@ UPDATE_CHECK_TIMEOUT = 120
 
 def pair_identifier(entry_id: str) -> str:
     return f"{entry_id}_ha_pair"
+
+
+def lr_identifier(entry_id: str, name: str) -> str:
+    return f"{entry_id}_lr_{name}"

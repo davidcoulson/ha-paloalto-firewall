@@ -75,6 +75,50 @@ actions:
 
 `request system software check` and `request content upgrade check` run every 6 hours per unit (configurable) and in the background at startup. The **PAN-OS** update entity tracks the newest release **in your installed feature train** (e.g. 11.1.x) — moving to a new train is a planning decision, so the newest release overall is shown in the `newest_release_any_train` attribute instead. Update entities are read-only; nothing is downloaded or installed.
 
+## Network: logical routers, WAN egress, interfaces, jobs
+
+These are read from the **active** firewall and live under the HA pair device (or the firewall's own device when standalone). Requires PAN-OS with the Advanced Routing Engine (logical routers).
+
+**One child device per logical router**, each with:
+
+| Entity | Notes |
+|---|---|
+| Internet egress / IPv6 internet egress | the zone this logical router sends internet traffic to (FIB lookup of 1.1.1.1 / 2606:4700:4700::1111); interface, next hop, vsys, matching route and ECMP paths as attributes |
+| Path monitor *interface* via *next hop* | one connectivity sensor per monitored next hop; monitored routes and probe results as attributes |
+| FIB routes | IPv4/IPv6 route counts (diagnostic) |
+
+When an egress changes, `paloalto_firewall_egress_change` fires with `logical_router`, `family`, `previous_interface`/`previous_zone` and `interface`/`zone`/`nexthop`. For example, to be told when internal traffic fails over between WANs:
+
+```yaml
+triggers:
+  - trigger: event
+    event_type: paloalto_firewall_egress_change
+    event_data:
+      logical_router: core-vr
+      family: ipv4
+actions:
+  - action: notify.mobile_app_phone
+    data:
+      message: "Internet now via {{ trigger.event.data.zone }} (was {{ trigger.event.data.previous_zone }})"
+```
+
+**On the pair device:**
+
+- Interface **link**, **link speed**, and **in/out throughput** for the interfaces chosen in *Configure* (by default, the interfaces used by path monitors and internet routes)
+- **Uncommitted changes**, **Running jobs**, and **Last commit** (from the firewall's job history; unknown once it ages out)
+
+## Route lookup
+
+`paloalto_firewall.route_lookup` returns the route, egress interface, next hop, zone and vsys a destination uses. Searches one `logical_router`, the logical router of a `source` IP's interface, or all of them:
+
+```yaml
+action: paloalto_firewall.route_lookup
+data:
+  destination: 1.1.1.1
+  source: 10.2.4.159        # optional
+response_variable: result
+```
+
 ## Look up a host (ARP / DHCP)
 
 The `paloalto_firewall.lookup` action searches the **active** firewall's ARP table and DHCP leases (falling back to the peer if the active unit can't be reached) and returns the matches. Run it from **Developer Tools → Actions**, or from a script:
@@ -119,8 +163,9 @@ data:
   destination: 1.1.1.1
   protocol: tcp          # tcp | udp | icmp | protocol number (default tcp)
   destination_port: 443
-  from_zone: iot         # optional, but recommended
-  to_zone: untrust       # optional
+  from_zone: IoT         # optional: inferred from the source IP's interface
+  to_zone: Spectrum      # optional: inferred from a route lookup
+  vsys: vsys1            # optional: inferred from the source interface (multi-vsys)
   application: ssl       # optional App-ID
   # source_user, category, show_all are also available
 response_variable: result
@@ -141,6 +186,10 @@ rules:
     to: [untrust]
     ...
 ```
+
+Anything you leave out of vsys, `from_zone` or `to_zone` is worked out the way the firewall would: from the interface whose subnet holds the source, and a FIB lookup of the destination in that interface's logical router. What was filled in is returned under `inferred`, and the route taken under `path`.
+
+`paloalto_firewall.test_nat_policy` works the same way (CLI `test nat-policy-match`), and also infers the egress `to_interface`.
 
 If no rule matches, `matched` is false and the default rules apply. Errors from the firewall, such as an unknown zone or application name, are raised as action errors.
 

@@ -95,6 +95,110 @@ POLICY_MATCH_OLD = OK.format("<rules><entry>IoT-to-Internet; index: 12</entry></
 POLICY_NO_MATCH = OK.format("<rules/>")
 
 
+# --- Advanced Routing / interfaces (synthetic, same shape as PAN-OS 12.1) ----
+# core-vr (vsys1, internal) reaches wan-a-vr (vsys2) / wan-b-vr (vsys3) via ae9.x
+
+
+def _ifnet(name, vsys, zone, fwd, ip, tag=0, addr6=""):
+    return (f"<entry><name>{name}</name><id>1</id><tag>{tag}</tag><vsys>{vsys}</vsys><zone>{zone}</zone>"
+            f"<fwd>{fwd}</fwd><ip>{ip}</ip><addr/><dyn-addr/><addr6>{addr6}</addr6></entry>")
+
+
+def interface_all(wan_b_link="up"):
+    hw = "".join(
+        f"<entry><name>{n}</name><id>1</id><type>0</type><mac>00:00:5e:00:53:0{i}</mac>"
+        f"<speed>{sp}</speed><duplex>{dx}</duplex><state>{st}</state><st>x</st></entry>"
+        for i, (n, sp, dx, st) in enumerate([
+            ("ethernet1/1", "10000", "full", "up"),
+            ("ethernet1/2", "10000", "full", wan_b_link),
+            ("ae1", "[n/a]", "[n/a]", "up"),
+            ("ae9", "[n/a]", "[n/a]", "up"),
+            ("ha1-a", "1000", "full", "up"),
+        ])
+    )
+    ifnet = "".join([
+        _ifnet("ethernet1/1", "2", "Internet", "lr:wan-a-vr", "100.64.10.2/10"),
+        _ifnet("ethernet1/2", "3", "Internet", "lr:wan-b-vr", "203.0.113.10/24"),
+        _ifnet("ae1", "1", "Trusted", "lr:core-vr", "10.9.1.1/24"),
+        _ifnet("ae1.20", "1", "IoT", "lr:core-vr", "10.9.20.1/24", 20, "fd00:9:20::1/64"),
+        _ifnet("ae9.100", "1", "WanA", "lr:core-vr", "172.31.0.1/30", 100, "fd00:99:a::2/64"),
+        _ifnet("ae9.101", "1", "WanB", "lr:core-vr", "172.31.0.5/30", 101, "fd00:99:b::2/64"),
+        _ifnet("ae9.200", "2", "Core", "lr:wan-a-vr", "172.31.0.2/30", 200),
+        _ifnet("ae9.201", "3", "Core", "lr:wan-b-vr", "172.31.0.6/30", 201),
+        _ifnet("ha1-a", "0", "", "ha", "198.18.0.1/30"),
+    ])
+    return OK.format(f"<hw>{hw}</hw><ifnet>{ifnet}</ifnet>")
+
+
+def _fib_entry(dst, iface, nh, flags="ug"):
+    return (f"<entry><id>1</id><dst>{dst}</dst><interface>{iface}</interface><nh_type>0</nh_type>"
+            f"<flags>{flags}</flags><nexthop>{nh}</nexthop><mtu>1500</mtu></entry>")
+
+
+def fib(core_v4_via="b"):
+    via = {"a": ("ae9.100", "172.31.0.2"), "b": ("ae9.101", "172.31.0.6")}[core_v4_via]
+    tables = {
+        ("core-vr", 0): [
+            _fib_entry("0.0.0.0/1", *via), _fib_entry("128.0.0.0/1", *via),
+            _fib_entry("10.9.0.0/16", "", "drop", "u"),
+            _fib_entry("10.9.1.0/24", "ae1", "0.0.0.0", "u"),
+            _fib_entry("10.9.20.0/24", "ae1.20", "0.0.0.0", "u"),
+            _fib_entry("172.31.0.0/30", "ae9.100", "0.0.0.0", "u"),
+            _fib_entry("172.31.0.4/30", "ae9.101", "0.0.0.0", "u"),
+        ],
+        ("core-vr", 1): [_fib_entry("2000::/3", "ae9.100", "fd00:99:a::1")],
+        ("wan-a-vr", 0): [
+            _fib_entry("0.0.0.0/0", "ethernet1/1", "100.64.0.1"),
+            _fib_entry("10.9.0.0/16", "ae9.200", "172.31.0.1"),
+        ],
+        ("wan-b-vr", 0): [
+            _fib_entry("0.0.0.0/0", "ethernet1/2", "203.0.113.1"),
+            _fib_entry("10.9.0.0/16", "ae9.201", "172.31.0.5"),
+        ],
+    }
+    body = "".join(
+        f"<entry><id>{i}</id><vr>{vr}</vr><max>20000</max><type>{t}</type><entries>{''.join(e)}</entries></entry>"
+        for i, ((vr, t), e) in enumerate(tables.items())
+    )
+    return OK.format(f"<dp>dp0</dp><total>12</total><fibs>{body}</fibs>")
+
+
+def path_monitor(wan_b_up=True):
+    def entry(dst, nh, iface, up):
+        mons = "".join(
+            f"<monitordst-{i}>{m}</monitordst-{i}><interval-count-{i}>3/5</interval-count-{i}>"
+            f"<monitorstatus-{i}>{'Success' if up else 'Failed'}</monitorstatus-{i}>"
+            for i, m in enumerate(["192.0.2.53", "198.51.100.53"])
+        )
+        return (f"<entry><destination>{dst}</destination><nexthop>{nh}</nexthop><metric>10</metric>"
+                f"<interface>{iface}</interface><pathmonitor-cond>Enabled(All)</pathmonitor-cond>"
+                f"<pathmonitor-status>{'Up' if up else 'Down'} </pathmonitor-status>{mons}</entry>")
+    return OK.format(
+        entry("0.0.0.0/0", "100.64.0.1", "ethernet1/1", True)
+        + entry("0.0.0.0/0", "203.0.113.1", "ethernet1/2", wan_b_up)
+        + entry("2000::/3", "fd00:99:b::1", "ae9.101", False)
+    )
+
+
+JOBS = OK.format(
+    "<job><tenq>2026/10/09 20:40:00</tenq><id>101</id><user>admin</user><type>Commit</type>"
+    "<status>FIN</status><result>OK</result><tfin>2026/10/09 20:41:10</tfin><progress>100</progress></job>"
+    "<job><tenq>2026/10/09 20:52:45</tenq><id>102</id><user>Auto update agent</user><type>WildFire</type>"
+    "<status>ACT</status><result>PEND</result><tfin/><progress>40</progress></job>"
+)
+
+
+def interface_detail(name, ibytes, obytes):
+    return OK.format(
+        f"<dp>dp0</dp><ifnet><name>{name}</name><counters><hw><entry><name>{name}</name>"
+        f"<ibytes>{ibytes}</ibytes><obytes>{obytes}</obytes><ipackets>1</ipackets><opackets>1</opackets>"
+        f"<ierrors>0</ierrors><idrops>0</idrops></entry></hw><ifnet/></counters></ifnet>"
+    )
+
+
+NAT_MATCH = OK.format('<rules><entry name="IoT-Hide-NAT"><index>2</index><from><member>IoT</member></from></entry></rules>')
+
+
 class FakePair:
     """State for two firewalls; tests mutate it to simulate failover/outage."""
 
@@ -105,6 +209,10 @@ class FakePair:
         }
         self.bad_password = False
         self.calls: list[tuple[str, str]] = []
+        self.vsys_calls: list[tuple[str, str | None]] = []
+        self.core_v4_via = "b"
+        self.wan_b_up = True
+        self.counter_calls = 0
 
     def peer(self, host):
         return next(u for h, u in self.units.items() if h != host)
@@ -117,6 +225,13 @@ class FakePair:
         if self.bad_password:
             raise PanOSAuthError("Invalid credentials")
         peer = self.peer(host)
+        if cmd.startswith("<show><interface>") and cmd != const.CMD_INTERFACE_ALL:
+            self.counter_calls += 1
+            name = cmd[len("<show><interface>"):-len("</interface></show>")]
+            n = self.counter_calls
+            return parse_response(interface_detail(name, n * 7_500_000, n * 750_000))
+        if cmd.startswith("<test><nat-policy-match>"):
+            return parse_response(NAT_MATCH)
         if cmd.startswith("<test><security-policy-match>"):
             if "<from>bogus</from>" in cmd:
                 return parse_response(
@@ -139,6 +254,11 @@ class FakePair:
             const.CMD_SOFTWARE_CHECK: SOFTWARE,
             const.CMD_CONTENT_CHECK: CONTENT,
             const.CMD_LICENSE_INFO: LICENSES,
+            const.CMD_INTERFACE_ALL: interface_all("up" if self.wan_b_up else "down"),
+            const.CMD_FIB: fib(self.core_v4_via),
+            const.CMD_PATH_MONITOR: path_monitor(self.wan_b_up),
+            const.CMD_JOBS: JOBS,
+            const.CMD_PENDING_CHANGES: OK.format("yes"),
             const.CMD_ARP_ALL: ARP,
             const.CMD_DHCP_LEASES: DHCP,
         }
@@ -155,6 +275,8 @@ class FakePair:
             return "KEY"
 
         async def op(self, cmd, timeout=30, vsys=None):
+            if cmd.startswith("<test>"):
+                fake.vsys_calls.append((cmd, vsys))
             return fake.respond(self.host, cmd)
 
         monkeypatch.setattr(PanOSClient, "generate_key", generate_key)

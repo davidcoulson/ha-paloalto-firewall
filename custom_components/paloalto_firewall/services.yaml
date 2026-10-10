@@ -64,10 +64,87 @@ test_security_policy:
     category:
       selector:
         text:
+    vsys:
+      example: vsys1
+      selector:
+        text:
     show_all:
       default: false
       selector:
         boolean:
+    config_entry_id:
+      selector:
+        config_entry:
+          integration: paloalto_firewall
+
+test_nat_policy:
+  fields:
+    source:
+      required: true
+      example: 10.2.4.86
+      selector:
+        text:
+    destination:
+      required: true
+      example: 1.1.1.1
+      selector:
+        text:
+    protocol:
+      default: tcp
+      selector:
+        select:
+          custom_value: true
+          options:
+            - tcp
+            - udp
+            - icmp
+    destination_port:
+      example: 443
+      selector:
+        number:
+          min: 0
+          max: 65535
+          mode: box
+    source_port:
+      selector:
+        number:
+          min: 0
+          max: 65535
+          mode: box
+    from_zone:
+      selector:
+        text:
+    to_zone:
+      selector:
+        text:
+    to_interface:
+      example: ethernet1/1
+      selector:
+        text:
+    vsys:
+      example: vsys1
+      selector:
+        text:
+    config_entry_id:
+      selector:
+        config_entry:
+          integration: paloalto_firewall
+
+route_lookup:
+  fields:
+    destination:
+      required: true
+      example: 1.1.1.1
+      selector:
+        text:
+    logical_router:
+      example: core-vr
+      selector:
+        text:
+    source:
+      example: 10.2.4.86
+      selector:
+        text:
     config_entry_id:
       selector:
         config_entry:
