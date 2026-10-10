@@ -1110,7 +1110,10 @@ def _epoch_iso(value: str | None) -> str | None:
         return None
     from datetime import timezone
 
-    return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+    try:
+        return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+    except (OverflowError, OSError, ValueError):
+        return None
 
 
 def _nonzero_ip(value: str | None) -> str | None:

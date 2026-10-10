@@ -7,6 +7,7 @@ import re
 from collections.abc import Mapping
 from typing import Any
 
+import aiohttp
 import voluptuous as vol
 
 from homeassistant.config_entries import ConfigEntry, ConfigFlow, ConfigFlowResult, OptionsFlow
@@ -52,6 +53,10 @@ class CannotConnect(Exception):
         self.host = host
 
 
+class InvalidCert(CannotConnect):
+    """TLS verification failed (typically a self-signed management certificate)."""
+
+
 class InvalidAuth(Exception):
     def __init__(self, host: str) -> None:
         super().__init__(host)
@@ -70,6 +75,8 @@ async def _probe(
         raise InvalidAuth(host) from err
     except (PanOSError, ValueError) as err:
         _LOGGER.debug("Probe of %s failed: %s", host, err)
+        if verify_ssl and isinstance(err.__cause__, aiohttp.ClientSSLError):
+            raise InvalidCert(host) from err
         raise CannotConnect(host) from err
     try:
         ha = parsers.parse_ha_state(await client.op(CMD_HA_STATE))
@@ -97,7 +104,7 @@ def _user_schema(defaults: Mapping[str, Any]) -> vol.Schema:
             vol.Required(CONF_PASSWORD): TextSelector(
                 TextSelectorConfig(type=TextSelectorType.PASSWORD)
             ),
-            vol.Required(CONF_VERIFY_SSL, default=defaults.get(CONF_VERIFY_SSL, False)): bool,
+            vol.Required(CONF_VERIFY_SSL, default=defaults.get(CONF_VERIFY_SSL, True)): bool,
         }
     )
 
@@ -125,6 +132,9 @@ class PanOSConfigFlow(ConfigFlow, domain=DOMAIN):
                 ]
             except InvalidAuth as err:
                 errors["base"] = "invalid_auth"
+                placeholders["host"] = err.host
+            except InvalidCert as err:
+                errors["base"] = "invalid_cert"
                 placeholders["host"] = err.host
             except CannotConnect as err:
                 errors["base"] = "cannot_connect"

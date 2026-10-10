@@ -149,3 +149,14 @@ def test_firewall_utc_offset():
     assert firewall_utc_offset("Sat Oct 10 13:42:00 2026", now) == 330
     assert firewall_utc_offset("garbage", now) is None
     assert firewall_utc_offset(None, now) is None
+
+
+def test_gp_session_bad_timestamps():
+    import xml.etree.ElementTree as ET
+
+    from custom_components.paloalto_firewall.parsers import parse_gp_sessions
+
+    xml = ("<result><entry><username>a</username><login-time-utc>99999999999999999</login-time-utc>"
+           "<logout-time-utc>-1</logout-time-utc></entry></result>")
+    s = parse_gp_sessions(ET.fromstring(xml))[0]
+    assert s["login_time"] is None

@@ -14,6 +14,8 @@ Built as a modern replacement for [FoUStep/ha-pan-customintegration](https://git
 
 Enter the **management** address of each firewall (not a floating/dataplane IP). For an HA pair enter both; for a standalone box leave the second field empty.
 
+**Verify TLS certificate** is on by default. Turn it off if the management interface uses the firewall's default self-signed certificate, or a certificate that doesn't match the address you entered. Setup tells you when that's the reason it can't connect.
+
 ## Firewall prep: a read-only API account
 
 On the firewall (it syncs to the peer with HA config sync):

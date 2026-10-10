@@ -794,3 +794,83 @@ async def test_late_path_monitors_and_peers_get_entities(hass: HomeAssistant, fa
     await _tick(hass, freezer, 301)
     assert hass.states.get(pm).state == "on"
     assert hass.states.get(peer).state == "on"
+
+
+async def test_interface_read_hiccup_keeps_network_data(hass: HomeAssistant, fake, freezer) -> None:
+    from custom_components.paloalto_firewall import const
+
+    await _setup(hass, fake)
+    fake.fail = {const.CMD_INTERFACE_ALL: "error"}
+    await _tick(hass, freezer, 61)
+    assert hass.states.get("sensor.core_vr_internet_egress").state == "WanB"
+    assert hass.states.get("binary_sensor.edge_ha_pair_ethernet1_1_link").state == "on"
+
+
+async def test_removed_logical_router_cleaned_up(hass: HomeAssistant, fake) -> None:
+    from homeassistant.helpers import device_registry as dr
+    from homeassistant.helpers import entity_registry as er
+
+    from custom_components.paloalto_firewall.const import lr_identifier, pair_identifier
+    from custom_components.paloalto_firewall.devices import ensure_device
+
+    entry = await _setup(hass, fake)
+    devices = dr.async_get(hass)
+    reg = er.async_get(hass)
+    pair = get_device(devices, (DOMAIN, pair_identifier(entry.entry_id)), entry.entry_id)
+    gone = ensure_device(
+        hass, entry, (DOMAIN, lr_identifier(entry.entry_id, "old-vr")), pair, name="old-vr",
+    )
+    stale = reg.async_get_or_create(
+        "sensor", DOMAIN, f"{entry.entry_id}_lr_old-vr_egress_ipv4",
+        config_entry=entry, device_id=gone.id,
+    )
+    assert await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert get_device(devices, (DOMAIN, lr_identifier(entry.entry_id, "old-vr")), entry.entry_id) is None
+    assert reg.async_get(stale.entity_id) is None
+    assert get_device(devices, (DOMAIN, lr_identifier(entry.entry_id, "core-vr")), entry.entry_id)
+    assert reg.async_get("sensor.core_vr_internet_egress") is not None
+
+
+async def test_failover_does_not_fire_bgp_change(hass: HomeAssistant, fake, freezer) -> None:
+    await _setup(hass, fake)
+    events = async_capture_events(hass, "paloalto_firewall_bgp_peer_change")
+    # The newly active unit reports a different peer state than the old one.
+    fake.dns_bgp_up = False
+    fake.units["fw1.lan"]["state"] = "passive"
+    fake.units["fw2.lan"]["state"] = "active"
+    await _tick(hass, freezer, 61)
+    await _tick(hass, freezer, 61)
+    assert hass.states.get("sensor.edge_ha_pair_active_firewall").state == "fw2"
+    assert events == []
+    # A real change on the new unit is still reported.
+    fake.dns_bgp_up = True
+    await _tick(hass, freezer, 301)
+    assert [e.data["established"] for e in events] == [True]
+
+
+async def test_new_entries_verify_tls_by_default(hass: HomeAssistant, fake) -> None:
+    from homeassistant.const import CONF_VERIFY_SSL as KEY
+
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": config_entries.SOURCE_USER}
+    )
+    import voluptuous as vol
+
+    defaults = {
+        str(k): k.default()
+        for k in result["data_schema"].schema
+        if getattr(k, "default", vol.UNDEFINED) is not vol.UNDEFINED
+    }
+    assert defaults[KEY] is True
+
+
+async def test_config_flow_explains_tls_failure(hass: HomeAssistant, fake) -> None:
+    fake.tls_error = True
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": config_entries.SOURCE_USER}
+    )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {**USER_INPUT, CONF_VERIFY_SSL: True}
+    )
+    assert result["errors"] == {"base": "invalid_cert"}

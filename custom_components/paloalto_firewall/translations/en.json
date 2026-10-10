@@ -14,7 +14,8 @@
         },
         "data_description": {
           "primary_host": "Host or IP, optionally with :port.",
-          "secondary_host": "Leave empty for a standalone firewall."
+          "secondary_host": "Leave empty for a standalone firewall.",
+          "verify_ssl": "Recommended. Turn off only if the management interface uses a self-signed certificate or one that doesn't match this address."
         }
       },
       "reauth_confirm": {
@@ -30,7 +31,8 @@
       "cannot_connect": "Could not reach {host}.",
       "invalid_auth": "{host} rejected the username or password.",
       "same_device": "Both addresses point at the same firewall.",
-      "unknown": "Unexpected error, see the log."
+      "unknown": "Unexpected error, see the log.",
+      "invalid_cert": "{host}'s certificate couldn't be verified (expected with the firewall's default self-signed certificate, or when connecting by IP). Turn off 'Verify TLS certificate' or install a trusted certificate that matches this address."
     },
     "abort": {
       "already_configured": "This firewall or pair is already configured.",

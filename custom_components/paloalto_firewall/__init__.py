@@ -9,6 +9,7 @@ from homeassistant.const import CONF_NAME, CONF_PASSWORD, CONF_USERNAME, CONF_VE
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.typing import ConfigType
@@ -200,10 +201,32 @@ def _remove_stale_network_entities(hass: HomeAssistant, entry: PanOSConfigEntry)
     cert_keep = {f"{cert_prefix}expiring"} | {
         f"{cert_prefix}{safe_key(c['name'])}" for c in (certs or {}).get("device", [])
     }
+    # Logical routers: only judged gone when interfaces and the FIB (which
+    # together define the router list) were both read fresh.
+    prune_lrs = ok.get("interfaces") and ok.get("fib")
+    lrs = set(data["egress"])
+    lr_prefix = f"{entry.entry_id}_lr_"
+    if prune_lrs:
+        devices = dr.async_get(hass)
+        current = {lr_identifier(entry.entry_id, lr) for lr in lrs}
+        for device in dr.async_entries_for_config_entry(devices, entry.entry_id):
+            for domain, ident in device.identifiers:
+                if domain == DOMAIN and ident.startswith(lr_prefix) and ident not in current:
+                    # Removes the device and every entity on it (egress, routes,
+                    # BGP) - the logical router was deleted or renamed.
+                    devices.async_update_device(device.id, remove_config_entry_id=entry.entry_id)
+                    break
+    lr_keep = {
+        f"{lr_prefix}{lr}_{suffix}"
+        for lr in lrs
+        for suffix in ("egress_ipv4", "egress_ipv6", "routes")
+    }
     registry = er.async_get(hass)
     for ent in er.async_entries_for_config_entry(registry, entry.entry_id):
         uid = ent.unique_id
-        if uid.startswith(prefix) and prune_ifs and uid not in if_keep:
+        if uid.startswith(lr_prefix) and prune_lrs and uid not in lr_keep:
+            registry.async_remove(ent.entity_id)
+        elif uid.startswith(prefix) and prune_ifs and uid not in if_keep:
             registry.async_remove(ent.entity_id)
         elif uid.startswith(pm_prefix) and ok.get("path_monitors") and uid not in pm_keep:
             # Path monitor whose next hop no longer exists (e.g. renumbered).

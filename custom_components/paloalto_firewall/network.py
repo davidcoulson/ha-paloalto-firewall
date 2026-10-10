@@ -224,11 +224,21 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         # rather than a second identical API call.
         gp_status = (unit.coordinator.data or {}).get("gp_users")
         gp_current = None if gp_status is None else gp_status.get("sessions", [])
-        if interfaces is None:
-            raise UpdateFailed(f"{unit.config.host}: could not read interfaces")
         # A failed read keeps the last good value from the same firewall, so a
         # single hiccup doesn't look like every route/monitor vanishing.
         prev = self.data if self.data and self.data.get("unit") == unit.config.hostname else {}
+        interfaces_ok = interfaces is not None
+        if interfaces is None:
+            interfaces = prev.get("interfaces")
+            if interfaces is None:
+                raise UpdateFailed(f"{unit.config.host}: could not read interfaces")
+        if unit_changed:
+            # New data source (failover): compare against this unit's own
+            # view from now on, so differences between the units aren't
+            # reported as changes.
+            self._prev_egress.clear()
+            self._prev_prefix.clear()
+            self._prev_bgp.clear()
         fib_ok = fib is not None
         if fib is None:
             fib = prev.get("fib") or []
@@ -276,6 +286,7 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         data["utc_offset_minutes"] = self._utc_offset
         # Which reads actually succeeded; entity cleanup only prunes on these.
         data["sources_ok"] = {
+            "interfaces": interfaces_ok,
             "fib": fib_ok,
             "path_monitors": pm_ok,
             "bgp": self._slow.get("bgp_ok", False),

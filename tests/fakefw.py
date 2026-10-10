@@ -418,6 +418,7 @@ class FakePair:
         self.gp_online = {"alice", "bob"}
         # cmd -> "403" (role not permitted) or "error" (command failed)
         self.fail: dict[str, str] = {}
+        self.tls_error = False
 
     def peer(self, host):
         return next(u for h, u in self.units.items() if h != host)
@@ -506,6 +507,18 @@ class FakePair:
         self.keygens = 0
 
         async def _post(self, data, with_key=True, timeout=30):
+            if fake.tls_error:
+                import ssl
+
+                import aiohttp
+
+                from custom_components.paloalto_firewall.api import PanOSConnectionError
+
+                raise PanOSConnectionError("certificate verify failed") from (
+                    aiohttp.ClientConnectorCertificateError(
+                        None, ssl.SSLCertVerificationError("self-signed certificate")
+                    )
+                )
             if data["type"] == "keygen":
                 fake.keygens += 1
                 fake.respond(self.host, const.CMD_SYSTEM_INFO)  # raises if down/bad auth
