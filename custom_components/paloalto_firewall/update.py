@@ -205,15 +205,26 @@ class PanOSGPClientUpdate(_PanOSUpdate):
                 on_progress=lambda p: self._set_progress(80 + p * 0.2),
             )
         except PanOSError as err:
+            reason = str(err)
+            if "superuser" in reason.lower():
+                reason = (
+                    "the firewall only lets a superuser activate GlobalProtect packages. "
+                    "Activate it under Device > GlobalProtect Client, or give the integration's "
+                    "admin a role that allows it"
+                )
             raise HomeAssistantError(
-                f"Installing GlobalProtect {target} on {self.unit.config.hostname} failed: {err}"
+                f"Installing GlobalProtect {target} on {self.unit.config.hostname} failed: {reason}"
             ) from err
         finally:
             self._attr_in_progress = False
             self._attr_update_percentage = None
             self.async_write_ha_state()
-        # The activated version comes from `show system info`; the version
-        # list's downloaded/current flags from the update check.
+            # Even after a failure the package may now be downloaded. The
+            # activated version comes from `show system info`; the version
+            # list's downloaded/current flags from the update check.
+            self.hass.async_create_task(self._refresh())
+
+    async def _refresh(self) -> None:
         await self.unit.coordinator.async_refresh()
         await self.coordinator.async_refresh()
 
