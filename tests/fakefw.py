@@ -416,6 +416,8 @@ class FakePair:
         self.wan_b_prefix = "2001:db8:b00::/56"
         self.dns_bgp_up = True
         self.gp_online = {"alice", "bob"}
+        # cmd -> "403" (role not permitted) or "error" (command failed)
+        self.fail: dict[str, str] = {}
 
     def peer(self, host):
         return next(u for h, u in self.units.items() if h != host)
@@ -428,6 +430,15 @@ class FakePair:
         if self.bad_password:
             raise PanOSAuthError("Invalid credentials")
         peer = self.peer(host)
+        if (kind := self.fail.get(cmd)) == "403":
+            return parse_response(
+                '<response status="error" code="403"><result><msg>'
+                "Type [op] not authorized for user role.</msg></result></response>"
+            )
+        if kind:
+            return parse_response(
+                '<response status="error"><msg><line>Command failed</line></msg></response>'
+            )
         if cmd.startswith("<show><interface>") and cmd != const.CMD_INTERFACE_ALL:
             self.counter_calls += 1
             name = cmd[len("<show><interface>"):-len("</interface></show>")]
@@ -488,20 +499,22 @@ class FakePair:
         return parse_response(table[cmd])
 
     def patch(self, monkeypatch):
+        """Stand in for the HTTP layer, so the client's key handling is real."""
         from custom_components.paloalto_firewall.api import PanOSClient
 
         fake = self
+        self.keygens = 0
 
-        async def generate_key(self):
-            fake.respond(self.host, const.CMD_SYSTEM_INFO)  # raises if down/bad auth
-            self.api_key = "KEY"
-            return "KEY"
-
-        async def op(self, cmd, timeout=30, vsys=None):
+        async def _post(self, data, with_key=True, timeout=30):
+            if data["type"] == "keygen":
+                fake.keygens += 1
+                fake.respond(self.host, const.CMD_SYSTEM_INFO)  # raises if down/bad auth
+                return parse_response(OK.format("<key>KEY</key>"))
+            cmd = data["cmd"]
+            vsys = data.get("vsys")
             fake.last_vsys = vsys
             if cmd.startswith("<test>"):
                 fake.vsys_calls.append((cmd, vsys))
             return fake.respond(self.host, cmd)
 
-        monkeypatch.setattr(PanOSClient, "generate_key", generate_key)
-        monkeypatch.setattr(PanOSClient, "op", op)
+        monkeypatch.setattr(PanOSClient, "_post", _post)

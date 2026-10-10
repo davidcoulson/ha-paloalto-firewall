@@ -6,7 +6,7 @@ import asyncio
 from datetime import timedelta
 
 from homeassistant.const import CONF_NAME, CONF_PASSWORD, CONF_USERNAME, CONF_VERIFY_SSL
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import entity_registry as er
@@ -110,18 +110,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: PanOSConfigEntry) -> boo
     runtime.network = PanOSNetworkCoordinator(
         hass, entry, scan, entry.options.get(CONF_INTERFACES)
     )
-    # Not fatal: logical-router and interface entities are skipped (until the
-    # next reload) if the routing/interface commands can't be read yet.
+    # Not fatal: if the interface/routing commands can't be read yet, the
+    # network devices and entities are created after the first good poll.
     await runtime.network.async_refresh()
-    _remove_stale_network_entities(hass, entry)
-    if runtime.network.data:
+    lr_parent = pair_device or unit_devices[0]
+
+    @callback
+    def _network_ready() -> None:
+        _remove_stale_network_entities(hass, entry)
         # Logical routers hang off the HA pair (or the lone firewall).
-        lr_parent = pair_device or unit_devices[0]
         for lr in runtime.network.data["egress"]:
             ensure_device(
                 hass, entry, (DOMAIN, lr_identifier(entry.entry_id, lr)), lr_parent,
                 name=lr, **LR_DEVICE_FIELDS,
             )
+
+    entry.async_on_unload(runtime.network.async_when_ready(_network_ready))
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
@@ -149,38 +153,46 @@ def _remove_stale_network_entities(hass: HomeAssistant, entry: PanOSConfigEntry)
     network = entry.runtime_data.network
     if network.data is None:
         return
-    keep = {
-        f"{entry.entry_id}_if_{name.replace('/', '_').replace('.', '_')}_"
-        for name in network.selected_interfaces(network.data)
-    }
+    data = network.data
+    ok = data.get("sources_ok", {})
+    # Interface entities: exact ids, and only prune auto-selected interfaces
+    # when the reads that drive auto-selection (FIB, path monitors) worked.
     prefix = f"{entry.entry_id}_if_"
+    if_keep = {
+        f"{prefix}{name.replace('/', '_').replace('.', '_')}_{suffix}"
+        for name in network.selected_interfaces(data)
+        for suffix in ("link", "in", "out", "speed")
+    }
+    prune_ifs = network.configured_interfaces is not None or (
+        ok.get("fib") and ok.get("path_monitors")
+    )
     pm_prefix = f"{entry.entry_id}_pm_"
-    pm_keep = {f"{pm_prefix}{pm_key_suffix(k)}" for k in network.data["path_groups"]}
+    pm_keep = {f"{pm_prefix}{pm_key_suffix(k)}" for k in data["path_groups"]}
     bgp_prefix = f"{entry.entry_id}_bgp_"
-    bgp_keep = {f"{bgp_prefix}{lr}_established" for lr in network.data.get("bgp", {})}
+    bgp_keep = {f"{bgp_prefix}{lr}_established" for lr in data.get("bgp", {})}
     bgp_keep |= {
         f"{bgp_prefix}{safe_key(lr)}_{safe_key(peer)}"
-        for lr, info in network.data.get("bgp", {}).items()
+        for lr, info in data.get("bgp", {}).items()
         if info["ok"]
         for peer in info["peers"]
     }
-    bgp_lrs_ok = all(info["ok"] for info in network.data.get("bgp", {}).values())
+    prune_bgp = ok.get("bgp") and all(info["ok"] for info in data.get("bgp", {}).values())
     cert_prefix = f"{entry.entry_id}_cert_"
-    certs = network.data.get("certificates")
+    certs = data.get("certificates")
     cert_keep = {f"{cert_prefix}expiring"} | {
         f"{cert_prefix}{safe_key(c['name'])}" for c in (certs or {}).get("device", [])
     }
     registry = er.async_get(hass)
     for ent in er.async_entries_for_config_entry(registry, entry.entry_id):
         uid = ent.unique_id
-        if uid.startswith(prefix) and not any(uid.startswith(k) for k in keep):
+        if uid.startswith(prefix) and prune_ifs and uid not in if_keep:
             registry.async_remove(ent.entity_id)
-        elif uid.startswith(pm_prefix) and uid not in pm_keep:
+        elif uid.startswith(pm_prefix) and ok.get("path_monitors") and uid not in pm_keep:
             # Path monitor whose next hop no longer exists (e.g. renumbered).
             registry.async_remove(ent.entity_id)
-        elif uid.startswith(bgp_prefix) and uid not in bgp_keep and bgp_lrs_ok:
+        elif uid.startswith(bgp_prefix) and prune_bgp and uid not in bgp_keep:
             # BGP peer removed from the configuration.
             registry.async_remove(ent.entity_id)
-        elif uid.startswith(cert_prefix) and certs is not None and uid not in cert_keep:
+        elif uid.startswith(cert_prefix) and ok.get("certs_device") and uid not in cert_keep:
             # Certificate deleted or renamed in the firewall config.
             registry.async_remove(ent.entity_id)

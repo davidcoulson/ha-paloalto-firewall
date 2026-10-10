@@ -73,9 +73,17 @@ class PanOSClient:
         # Small boxes (PA-4xx) have weak management planes; don't hammer them.
         self._sem = asyncio.Semaphore(2)
         self._key_lock = asyncio.Lock()
+        self._forbidden: set[str] = set()
 
-    async def generate_key(self) -> str:
+    async def generate_key(self, stale_key: str | None = None) -> str:
+        """Get a new API key; concurrent callers share one keygen.
+
+        ``stale_key`` is the key the caller saw rejected (or None when there
+        was no key). If another task already replaced it, that key is reused.
+        """
         async with self._key_lock:
+            if self.api_key and self.api_key != stale_key:
+                return self.api_key
             result = await self._post(
                 {"type": "keygen", "user": self._username, "password": self._password},
                 with_key=False,
@@ -94,18 +102,28 @@ class PanOSClient:
         ``vsys`` sets the target vsys for this request only (multi-vsys).
         """
         if not self.api_key:
-            await self.generate_key()
+            await self.generate_key(None)
         data = {"type": "op", "cmd": cmd}
         if vsys:
             data["vsys"] = vsys
+        used_key = self.api_key
         try:
             return await self._post(data, timeout=timeout)
-        except PanOSAuthError:
+        except PanOSAuthError as err:
+            if cmd in self._forbidden:
+                # Already proven to be a role restriction, not an expired key.
+                raise PanOSApiError(f"Not permitted for this admin role: {err}", "403") from err
             # API keys can expire (PAN-OS 10.2+ key lifetime) or be rotated by
             # a master-key change; regenerate once with the stored password.
             _LOGGER.debug("API key rejected by %s, regenerating", self.host)
-            await self.generate_key()
+            await self.generate_key(used_key)
+        try:
             return await self._post(data, timeout=timeout)
+        except PanOSAuthError as err:
+            # The password just produced a working key, so a 403 now means the
+            # admin role isn't allowed this command - not bad credentials.
+            self._forbidden.add(cmd)
+            raise PanOSApiError(f"Not permitted for this admin role: {err}", "403") from err
 
     async def _post(
         self, data: dict[str, str], with_key: bool = True, timeout: int = DEFAULT_TIMEOUT

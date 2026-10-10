@@ -13,7 +13,7 @@ from .coordinator import PanOSConfigEntry
 
 TO_REDACT = {
     CONF_PASSWORD, CONF_USERNAME, "users", "admins", "mgmt_ip", "peer_mgmt_ip",
-    "ips", "nexthop", "monitors", "sessions", "gp_previous", "gp_current", "gp_users",
+    "ips", "nexthop", "monitors", "host", "routes", "sessions", "gp_previous", "gp_current", "gp_users",
 }
 
 
@@ -46,7 +46,8 @@ async def async_get_config_entry_diagnostics(
                 "unit": runtime.network.data["unit"],
                 "selected_interfaces": runtime.network.selected_interfaces(runtime.network.data),
                 "egress": runtime.network.data["egress"],
-                "path_groups": runtime.network.data["path_groups"],
+                # Keys embed next-hop IPs; values are redacted below.
+                "path_groups": list(runtime.network.data["path_groups"].values()),
                 "pending_changes": runtime.network.data["pending_changes"],
                 "running_jobs": (runtime.network.data["jobs"] or {}).get("running"),
                 "interface_count": len(runtime.network.data["interfaces"]),

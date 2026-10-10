@@ -681,3 +681,102 @@ async def test_session_lookup(hass: HomeAssistant, fake) -> None:
 
     with pytest.raises(ServiceValidationError):
         await hass.services.async_call(DOMAIN, "session_lookup", {}, blocking=True, return_response=True)
+
+
+async def test_permission_denied_command_is_not_reauth(hass: HomeAssistant, fake) -> None:
+    from custom_components.paloalto_firewall import const
+
+    fake.fail = {const.CMD_IPSEC_SA: "403", const.CMD_CERTS_DEVICE: "403"}
+    entry = await _setup(hass, fake)
+    assert entry.state is config_entries.ConfigEntryState.LOADED
+    assert not hass.config_entries.flow.async_progress_by_handler(DOMAIN)
+    assert hass.states.get("sensor.fw1_active_sessions").state == "1200"
+    # One initial key per unit, plus one retry per forbidden command - no storm.
+    assert fake.keygens <= 2 + 2 * len(fake.fail)
+    await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert entry.state is config_entries.ConfigEntryState.LOADED
+
+
+async def test_transient_failures_keep_entities_and_stay_quiet(
+    hass: HomeAssistant, fake, freezer
+) -> None:
+    from homeassistant.helpers import entity_registry as er
+
+    from custom_components.paloalto_firewall import const
+
+    entry = await _setup(hass, fake)
+    reg = er.async_get(hass)
+    kept = [
+        "binary_sensor.core_vr_bgp_dns_anycast_0",
+        "sensor.core_vr_bgp_peers_established",
+        "binary_sensor.wan_b_vr_path_monitor_ethernet1_2_via_203_0_113_1",
+        "sensor.edge_ha_pair_certificate_fw_example_net",
+        "sensor.edge_ha_pair_ethernet1_1_in",
+    ]
+    assert all(reg.async_get(e) for e in kept)
+
+    egress = async_capture_events(hass, "paloalto_firewall_egress_change")
+    gp_off = async_capture_events(hass, "paloalto_firewall_globalprotect_disconnect")
+    bgp = async_capture_events(hass, "paloalto_firewall_bgp_peer_change")
+    fake.fail = {
+        const.CMD_FIB: "error",
+        const.CMD_PATH_MONITOR: "error",
+        const.CMD_GP_USERS: "error",
+        const.CMD_BGP_SUMMARY: "error",
+        const.CMD_CERTS_DEVICE: "error",
+    }
+    await _tick(hass, freezer, 301)
+    assert egress == [] and gp_off == [] and bgp == []
+    # Last good routing data is kept rather than showing "no route".
+    assert hass.states.get("sensor.core_vr_internet_egress").state not in ("unknown", "unavailable")
+
+    # A reload while those reads fail must not prune their entities.
+    assert await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert all(reg.async_get(e) for e in kept), [e for e in kept if not reg.async_get(e)]
+
+    fake.fail = {}
+    await _tick(hass, freezer, 301)
+    assert egress == [] and gp_off == [] and bgp == []
+
+
+async def test_network_entities_appear_after_late_first_poll(
+    hass: HomeAssistant, fake, freezer
+) -> None:
+    from custom_components.paloalto_firewall import const
+
+    fake.fail = {const.CMD_INTERFACE_ALL: "error"}
+    await _setup(hass, fake)
+    assert hass.states.get("sensor.core_vr_internet_egress") is None
+    fake.fail = {}
+    await _tick(hass, freezer, 61)
+    assert hass.states.get("sensor.core_vr_internet_egress").state == "WanB"
+    assert hass.states.get("binary_sensor.edge_ha_pair_uncommitted_changes") is not None
+
+
+async def test_options_keep_automatic_interfaces(hass: HomeAssistant, fake) -> None:
+    entry = await _setup(hass, fake)
+    network = entry.runtime_data.network
+    auto = network.auto_interfaces(network.data)
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"scan_interval": 30, "update_check_hours": 6, "interfaces": list(auto)}
+    )
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert "interfaces" not in entry.options
+    assert entry.options["scan_interval"] == 30
+
+
+async def test_subinterface_entities_cleaned_up_exactly(hass: HomeAssistant, fake) -> None:
+    from homeassistant.helpers import entity_registry as er
+
+    entry = await _setup(hass, fake)
+    reg = er.async_get(hass)
+    stale = reg.async_get_or_create(
+        "sensor", DOMAIN, f"{entry.entry_id}_if_ethernet1_1_10_in", config_entry=entry
+    )
+    assert await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert reg.async_get(stale.entity_id) is None
+    assert reg.async_get("sensor.edge_ha_pair_ethernet1_1_in") is not None

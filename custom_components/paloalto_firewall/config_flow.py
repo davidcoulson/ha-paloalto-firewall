@@ -225,6 +225,7 @@ class PanOSOptionsFlow(OptionsFlow):
         network = getattr(getattr(self.config_entry, "runtime_data", None), "network", None)
         available: list[str] = []
         current: list[str] = []
+        auto: list[str] | None = None
         if network is not None and network.data is not None:
             available = sorted(
                 (
@@ -235,13 +236,18 @@ class PanOSOptionsFlow(OptionsFlow):
                 key=_iface_sort_key,
             )
             current = network.selected_interfaces(network.data)
+            auto = network.auto_interfaces(network.data)
         if user_input is not None:
             options = {
                 CONF_SCAN_INTERVAL: int(user_input[CONF_SCAN_INTERVAL]),
                 CONF_UPDATE_INTERVAL: int(user_input[CONF_UPDATE_INTERVAL]),
             }
             if CONF_INTERFACES in user_input:
-                options[CONF_INTERFACES] = list(user_input[CONF_INTERFACES])
+                chosen = list(user_input[CONF_INTERFACES])
+                # The form is pre-filled, so an unchanged automatic selection
+                # comes back too; keep it automatic rather than freezing it.
+                if auto is None or sorted(chosen) != sorted(auto):
+                    options[CONF_INTERFACES] = chosen
             elif CONF_INTERFACES in self.config_entry.options:
                 options[CONF_INTERFACES] = self.config_entry.options[CONF_INTERFACES]
             return self.async_create_entry(data=options)

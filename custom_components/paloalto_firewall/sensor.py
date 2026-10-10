@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, time
+from datetime import datetime, time, timedelta, timezone
 from typing import Any
 
 from homeassistant.components.sensor import (
@@ -343,8 +343,13 @@ async def async_setup_entry(
             for desc in UNIT_SENSORS
             if desc.on_pair
         )
-    entities.extend(network_sensors(entry))
     async_add_entities(entities)
+    if entry.runtime_data.network is not None:
+        entry.async_on_unload(
+            entry.runtime_data.network.async_when_ready(
+                lambda: async_add_entities(network_sensors(entry))
+            )
+        )
     _track_certificates(entry, async_add_entities)
 
 
@@ -540,7 +545,13 @@ class PanOSLastCommitSensor(PanOSNetworkEntity, SensorEntity):
     def _current(self) -> tuple[datetime, dict[str, Any]] | None:
         jobs = self.data.get("jobs") or {}
         if (when := jobs.get("last_commit_time")) and jobs.get("last_commit"):
-            when = when.replace(tzinfo=dt_util.DEFAULT_TIME_ZONE)
+            # Job times are the firewall's local time, which may differ from HA's.
+            offset = self.data.get("utc_offset_minutes")
+            when = when.replace(
+                tzinfo=dt_util.DEFAULT_TIME_ZONE
+                if offset is None
+                else timezone(timedelta(minutes=offset))
+            )
             if self._last is None or when >= self._last[0]:
                 self._last = (when, jobs["last_commit"])
         return self._last

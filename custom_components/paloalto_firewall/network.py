@@ -11,9 +11,10 @@ import ipaddress
 import logging
 import time
 from datetime import datetime, timedelta
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
@@ -176,6 +177,7 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         self._prev_gp: dict[str, bool] = {}
         self._gp_known: set[str] = set()
         self._gp_seen: dict[str, dict[str, Any]] = {}
+        self._utc_offset: int | None = None
 
     async def _optional(self, unit: PanOSUnit, key: str, cmd: str, parser) -> Any:
         try:
@@ -192,6 +194,10 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         """Configured interfaces, or by default the WAN-facing ones."""
         if self.configured_interfaces is not None:
             return [i for i in self.configured_interfaces if i in data["interfaces"]]
+        return self.auto_interfaces(data)
+
+    def auto_interfaces(self, data: dict[str, Any]) -> list[str]:
+        """WAN-facing interfaces: path-monitored ones and each router's egress."""
         auto: list[str] = []
         for pm in data["path_monitors"] or []:
             auto.append(pm["interface"])
@@ -220,7 +226,15 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         gp_current = None if gp_status is None else gp_status.get("sessions", [])
         if interfaces is None:
             raise UpdateFailed(f"{unit.config.host}: could not read interfaces")
-        fib = fib or []
+        # A failed read keeps the last good value from the same firewall, so a
+        # single hiccup doesn't look like every route/monitor vanishing.
+        prev = self.data if self.data and self.data.get("unit") == unit.config.hostname else {}
+        fib_ok = fib is not None
+        if fib is None:
+            fib = prev.get("fib") or []
+        pm_ok = path_monitors is not None
+        if path_monitors is None:
+            path_monitors = prev.get("path_monitors")
         data: dict[str, Any] = {
             "unit": unit.config.hostname,
             "interfaces": interfaces,
@@ -240,15 +254,33 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         }
         data["path_groups"] = self._group_path_monitors(interfaces, path_monitors or [])
         data["counters"] = await self._counters(unit, self.selected_interfaces(data))
-        self._fire_egress_events(data["egress"])
+        if fib_ok:
+            self._fire_egress_events(data["egress"])
 
         now = dt_util.utcnow()
         if unit_changed or self._slow_at is None or now - self._slow_at >= self.slow_interval:
             await self._refresh_slow(unit, interfaces)
             self._slow_at = now
-        data.update({k: v for k, v in self._slow.items() if k != "unit"})
+        data.update(
+            {k: v for k, v in self._slow.items() if k not in ("unit", "bgp_ok", "certs_device_ok")}
+        )
         data["gp_users"] = self._gp_users(gp_current, data.get("gp_previous"))
-        self._fire_gp_events(data["gp_users"], unit_changed)
+        if gp_current is not None:
+            # Unknown current users (read failed) must not look like everyone
+            # disconnecting.
+            self._fire_gp_events(data["gp_users"], unit_changed)
+        system = (unit.coordinator.data or {}).get("system") or {}
+        offset = parsers.firewall_utc_offset(system.get("time"), now)
+        if offset is not None:
+            self._utc_offset = offset
+        data["utc_offset_minutes"] = self._utc_offset
+        # Which reads actually succeeded; entity cleanup only prunes on these.
+        data["sources_ok"] = {
+            "fib": fib_ok,
+            "path_monitors": pm_ok,
+            "bgp": self._slow.get("bgp_ok", False),
+            "certs_device": self._slow.get("certs_device_ok", False),
+        }
         return data
 
     def _gp_users(
@@ -301,6 +333,26 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 )
             self._prev_gp[name] = info["connected"]
 
+    @callback
+    def async_when_ready(self, action: Callable[[], None]) -> Callable[[], None]:
+        """Run ``action`` now if data is loaded, else once after the first good poll."""
+        if self.data is not None:
+            action()
+            return lambda: None
+        unsub: Callable[[], None] | None = None
+
+        @callback
+        def _listener() -> None:
+            nonlocal unsub
+            if self.data is None or unsub is None:
+                return
+            unsub()
+            unsub = None
+            action()
+
+        unsub = self.async_add_listener(_listener)
+        return lambda: unsub() if unsub else None
+
     def remember_gp_users(self, users: set[str]) -> None:
         """Users known from earlier runs keep reporting (as disconnected)."""
         self._gp_known |= users
@@ -326,8 +378,17 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 self._optional(unit, "certs_store", CMD_CERTS_STORE, parsers.parse_cert_store),
             )
         )
+        same_unit = self._slow.get("unit") == unit.config.hostname
+        prefix_ok = prefix_pools is not None
+        if prefix_pools is None:
+            prefix_pools = self._slow.get("prefix_pools", {}) if same_unit else {}
+        bgp_ok = bgp is not None
+        if bgp is None:
+            bgp = self._slow.get("bgp", {}) if same_unit else {}
         self._slow = {
             "unit": unit.config.hostname,
+            "bgp_ok": bgp_ok,
+            "certs_device_ok": certs_device is not None,
             "jobs": jobs,
             "pending_changes": pending,
             "prefix_pools": prefix_pools,
@@ -337,12 +398,19 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             if certs_device is None and certs_store is None
             else {"device": certs_device or [], "store": certs_store or []},
         }
-        self._fire_prefix_events(prefix_pools)
-        self._fire_bgp_events(bgp)
+        if prefix_ok:
+            self._fire_prefix_events(prefix_pools)
+        if bgp_ok:
+            self._fire_bgp_events(bgp)
 
-    async def _bgp(self, unit: PanOSUnit) -> dict[str, dict[str, Any]]:
-        """{logical router: {router_id, local_as, peers}} for BGP-enabled routers."""
+    async def _bgp(self, unit: PanOSUnit) -> dict[str, dict[str, Any]] | None:
+        """{logical router: {router_id, local_as, peers}} for BGP-enabled routers.
+
+        None when the summary couldn't be read (as opposed to no BGP at all).
+        """
         summary = await self._optional(unit, "bgp_summary", CMD_BGP_SUMMARY, parsers.parse_bgp_summary)
+        if summary is None:
+            return None
         if not summary:
             return {}
         enabled = [lr for lr, info in summary.items() if info["enabled"]]
@@ -387,9 +455,11 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
 
     async def _prefix_pools(
         self, unit: PanOSUnit, interfaces: dict[str, dict[str, Any]]
-    ) -> dict[str, dict[str, Any]]:
-        """DHCPv6-PD pools, each checked against its WAN vsys's NPTv6 rules."""
+    ) -> dict[str, dict[str, Any]] | None:
+        """DHCPv6-PD pools, each checked against its WAN vsys's NPTv6 rules (None: unreadable)."""
         pools = await self._optional(unit, "pd_pools", CMD_PD_POOLS, parsers.parse_pd_pools)
+        if pools is None:
+            return None
         if not pools:
             return {}
         nat_by_vsys: dict[str, dict[str, Any] | None] = {}

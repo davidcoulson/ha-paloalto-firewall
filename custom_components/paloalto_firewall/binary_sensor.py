@@ -108,8 +108,13 @@ async def async_setup_entry(
         entities.append(PanOSLicenseBinary(entry, unit, LICENSE_BINARY))
     if runtime.pair:
         entities.append(PanOSPairHealth(entry, runtime.pair, PAIR_HEALTH))
-    entities.extend(network_binary_sensors(entry))
     async_add_entities(entities)
+    if entry.runtime_data.network is not None:
+        entry.async_on_unload(
+            entry.runtime_data.network.async_when_ready(
+                lambda: async_add_entities(network_binary_sensors(entry))
+            )
+        )
     _track_gp_users(hass, entry, async_add_entities)
 
 

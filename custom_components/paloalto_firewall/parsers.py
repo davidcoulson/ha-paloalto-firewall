@@ -85,6 +85,7 @@ _SYSTEM_FIELDS = {
     "device_cert_status": "device-certificate-status",
     "uptime_raw": "uptime",
     "multi_vsys": "multi-vsys",
+    "time": "time",
 }
 
 _UPTIME_RE = re.compile(r"(?:(\d+)\s+days?,?\s*)?(\d+):(\d{2}):(\d{2})")
@@ -1307,3 +1308,19 @@ def certs_expiring(
     soon.sort(key=lambda i: i["expires"])
     expired.sort(key=lambda i: i["expires"])
     return {"expiring": soon, "expired": expired}
+
+
+def firewall_utc_offset(fw_time: str | None, utc_now: datetime) -> int | None:
+    """Minutes the firewall's local clock is ahead of UTC (rounded to 15 min).
+
+    ``fw_time`` is `show system info` <time>, e.g. 'Sat Oct 10 04:12:47 2026'.
+    """
+    if not fw_time:
+        return None
+    try:
+        local = datetime.strptime(" ".join(fw_time.split()), "%a %b %d %H:%M:%S %Y")
+    except ValueError:
+        return None
+    minutes = (local - utc_now.replace(tzinfo=None)).total_seconds() / 60
+    offset = int(round(minutes / 15) * 15)
+    return offset if -14 * 60 <= offset <= 14 * 60 else None

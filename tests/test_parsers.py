@@ -136,3 +136,16 @@ def test_nat_text_match_and_running_nat():
     assert problems and "/128" in problems[0]
     pools = parsers.parse_pd_pools(parse_response(fakefw.pd_pools()))
     assert pools["wan-b"]["prefix"] == "2001:db8:b00::/56" and pools["wan-a"]["state"] == "active"
+
+
+def test_firewall_utc_offset():
+    from datetime import datetime, timezone
+
+    from custom_components.paloalto_firewall.parsers import firewall_utc_offset
+
+    now = datetime(2026, 10, 10, 8, 12, 0, tzinfo=timezone.utc)
+    assert firewall_utc_offset("Sat Oct 10 04:12:47 2026", now) == -240
+    assert firewall_utc_offset("Sat Oct 10 08:13:30 2026", now) == 0
+    assert firewall_utc_offset("Sat Oct 10 13:42:00 2026", now) == 330
+    assert firewall_utc_offset("garbage", now) is None
+    assert firewall_utc_offset(None, now) is None
