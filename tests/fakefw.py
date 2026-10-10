@@ -154,7 +154,7 @@ class FakePair:
             self.api_key = "KEY"
             return "KEY"
 
-        async def op(self, cmd, timeout=30):
+        async def op(self, cmd, timeout=30, vsys=None):
             return fake.respond(self.host, cmd)
 
         monkeypatch.setattr(PanOSClient, "generate_key", generate_key)

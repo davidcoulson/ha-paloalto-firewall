@@ -8,6 +8,7 @@ from homeassistant.components.diagnostics import async_redact_data
 from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
 from homeassistant.core import HomeAssistant
 
+from . import probes
 from .coordinator import PanOSConfigEntry
 
 TO_REDACT = {CONF_PASSWORD, CONF_USERNAME, "users", "admins", "mgmt_ip", "peer_mgmt_ip"}
@@ -18,7 +19,11 @@ async def async_get_config_entry_diagnostics(
 ) -> dict[str, Any]:
     runtime = entry.runtime_data
     pair = runtime.pair
-    return async_redact_data(
+    raw: dict[str, Any] | None = None
+    if probes.debug_enabled():
+        unit = (pair.active_unit if pair else None) or runtime.units[0]
+        raw = {"firewall": unit.config.hostname, **(await probes.collect(unit.client))}
+    data = async_redact_data(
         {
             "entry": {"data": dict(entry.data), "options": dict(entry.options)},
             "units": [
@@ -43,3 +48,6 @@ async def async_get_config_entry_diagnostics(
         },
         TO_REDACT,
     )
+    if raw is not None:
+        data["raw_command_samples"] = raw
+    return data

@@ -86,18 +86,26 @@ class PanOSClient:
             self.api_key = key.strip()
             return self.api_key
 
-    async def op(self, cmd: str, timeout: int = DEFAULT_TIMEOUT) -> ET.Element:
-        """Run an operational command and return its <result> element."""
+    async def op(
+        self, cmd: str, timeout: int = DEFAULT_TIMEOUT, vsys: str | None = None
+    ) -> ET.Element:
+        """Run an operational command and return its <result> element.
+
+        ``vsys`` sets the target vsys for this request only (multi-vsys).
+        """
         if not self.api_key:
             await self.generate_key()
+        data = {"type": "op", "cmd": cmd}
+        if vsys:
+            data["vsys"] = vsys
         try:
-            return await self._post({"type": "op", "cmd": cmd}, timeout=timeout)
+            return await self._post(data, timeout=timeout)
         except PanOSAuthError:
             # API keys can expire (PAN-OS 10.2+ key lifetime) or be rotated by
             # a master-key change; regenerate once with the stored password.
             _LOGGER.debug("API key rejected by %s, regenerating", self.host)
             await self.generate_key()
-            return await self._post({"type": "op", "cmd": cmd}, timeout=timeout)
+            return await self._post(data, timeout=timeout)
 
     async def _post(
         self, data: dict[str, str], with_key: bool = True, timeout: int = DEFAULT_TIMEOUT
