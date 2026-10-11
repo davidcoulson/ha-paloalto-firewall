@@ -1071,13 +1071,23 @@ async def test_repairs(hass: HomeAssistant, fake, freezer) -> None:
     # Updates the read-only account can't install are raised once per version.
     gp = [i for k, i in found.items() if k.startswith("update_gpclient")]
     assert len(gp) == 1 and gp[0].severity == ir.IssueSeverity.WARNING
-    assert gp[0].translation_placeholders == {
+    placeholders = dict(gp[0].translation_placeholders)
+    commands = placeholders.pop("commands")
+    # Passive fw2 is listed first.
+    assert placeholders == {
         "version": "6.3.3-c1199",
-        "names": "fw1 & fw2",
-        "firewalls": "fw1 (6.3.3-c1046), fw2 (6.3.3-c1046)",
+        "names": "fw2 & fw1",
+        "firewalls": "fw2 (6.3.3-c1046), fw1 (6.3.3-c1046)",
     }
+    assert commands.index("# fw2 (passive)") < commands.index("# fw1 (active)")
+    assert commands.count("request global-protect-client software activate version 6.3.3-c1199") == 2
     panos = [i for k, i in found.items() if k.startswith("update_panos")]
     assert [i.translation_placeholders["version"] for i in panos] == ["11.1.6-h3"]
+    steps = panos[0].translation_placeholders["commands"]
+    fw1 = steps[steps.index("# fw1") :]
+    assert "request system software install version 11.1.6-h3" in steps
+    assert fw1.index("state suspend") < fw1.index("software install") < fw1.index("state functional")
+    assert "suspend" not in steps[: steps.index("# fw1")]
     assert not any(k.startswith("update_content") for k in found)
 
     # A brief desync (e.g. during a commit) is ignored; a lasting one is raised.

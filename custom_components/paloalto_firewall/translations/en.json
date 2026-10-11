@@ -349,11 +349,11 @@
     },
     "update_panos": {
       "title": "{names}: PAN-OS {version} is available",
-      "description": "PAN-OS {version} is the newest release in the feature train installed on: {firewalls}.\n\nRead the release notes, then download and install it under Device > Software (on an HA pair, upgrade the passive firewall first). Home Assistant can't install it: the integration's account is read-only."
+      "description": "PAN-OS {version} is the newest release in the feature train installed on: {firewalls}.\n\nRead the release notes first. Home Assistant can't install it: the integration's account is read-only. Upgrade from each firewall's CLI in this order (passive first on an HA pair; wait for it to come back and show synchronized before the next), or use Device > Software:\n\n{commands}"
     },
     "update_gpclient": {
       "title": "{names}: GlobalProtect client {version} is available",
-      "description": "GlobalProtect client {version} is available for the portal on: {firewalls}.\n\nDownload and activate it under Device > GlobalProtect Client on each firewall. Home Assistant can't do this: PAN-OS only lets a superuser activate a client package. GlobalProtect apps then upgrade according to the portal's app upgrade setting."
+      "description": "GlobalProtect client {version} is available for the portal on: {firewalls}.\n\nHome Assistant can't install it: PAN-OS only lets a superuser activate a client package. Run these on each firewall's CLI (or use Device > GlobalProtect Client):\n\n{commands}\n\nGlobalProtect apps then upgrade according to the portal's app upgrade setting."
     }
   }
 }

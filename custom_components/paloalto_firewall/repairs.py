@@ -168,14 +168,16 @@ class PanOSRepairs:
             ("gpclient", "gp_client", "gp_client_version", latest_gp_client, gp_version_key),
         )
         all_current = True
-        # kind -> newest version -> [(hostname, installed)]
-        pending: dict[str, dict[str, list[tuple[str, str]]]] = {k[0]: {} for k in kinds}
+        # kind -> newest version -> [(hostname, installed, HA state)]
+        pending: dict[str, dict[str, list[tuple[str, str, str | None]]]] = {k[0]: {} for k in kinds}
         for unit in self.entry.runtime_data.units:
             checks = unit.updates.data
             system = (unit.coordinator.data or {}).get("system")
             if checks is None or system is None:
                 all_current = False
                 continue
+            ha = (unit.coordinator.data or {}).get("ha") or {}
+            ha_state = ha.get("local_state") if ha.get("enabled") else None
             for kind, section, installed_key, latest_fn, key_fn in kinds:
                 installed = system.get(installed_key)
                 versions = (checks.get(section) or {}).get("versions")
@@ -186,20 +188,54 @@ class PanOSRepairs:
                     continue
                 newest, current = key_fn(train["version"]), key_fn(installed)
                 if newest is not None and current is not None and newest > current:
-                    pending[kind].setdefault(train["version"], []).append((unit.config.hostname, installed))
+                    pending[kind].setdefault(train["version"], []).append(
+                        (unit.config.hostname, installed, ha_state)
+                    )
         for kind, by_version in pending.items():
             for version, units in by_version.items():
+                # Passive firewall first: that's the order to upgrade an HA pair.
+                units.sort(key=lambda u: u[2] in ("active", "active-primary"))
                 wanted[f"{self.prefix}update_{kind}_{name_key(version)}"] = {
                     "severity": ir.IssueSeverity.WARNING,
                     "key": f"update_{kind}",
                     "placeholders": {
                         "version": version,
-                        "names": " & ".join(h for h, _ in units),
-                        "firewalls": ", ".join(f"{h} ({i})" for h, i in units),
+                        "names": " & ".join(u[0] for u in units),
+                        "firewalls": ", ".join(f"{u[0]} ({u[1]})" for u in units),
+                        "commands": _commands(kind, version, units),
                     },
                 }
         if all_current:
             known.add("update")
+
+
+def _commands(kind: str, version: str, units: list[tuple[str, str, str | None]]) -> str:
+    """CLI to apply the update, one block per firewall in upgrade order."""
+    blocks = []
+    for host, _installed, state in units:
+        label = f"# {host}" + (f" ({state})" if state else "")
+        if kind == "gpclient":
+            lines = [
+                f"request global-protect-client software download version {version}",
+                "show jobs all   # wait for the download to show FIN / OK",
+                f"request global-protect-client software activate version {version}",
+            ]
+        else:
+            active = state in ("active", "active-primary")
+            lines = []
+            if active and len(units) > 1:
+                lines.append("request high-availability state suspend   # fail over to the upgraded peer")
+            lines += [
+                f"request system software download version {version}",
+                "show jobs all   # wait for the download to show FIN / OK",
+                f"request system software install version {version}",
+                "show jobs all   # wait for the install to show FIN / OK",
+                "request restart system",
+            ]
+            if active and len(units) > 1:
+                lines.append("request high-availability state functional   # once it's back up")
+        blocks.append("\n".join([label, *lines]))
+    return "```\n" + "\n\n".join(blocks) + "\n```"
 
 
 @callback
