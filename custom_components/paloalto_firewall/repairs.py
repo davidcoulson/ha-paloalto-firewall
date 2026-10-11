@@ -87,11 +87,15 @@ class PanOSRepairs:
                     "key": f"certificate_{kind}",
                     "placeholders": {
                         "name": cert["name"],
-                        "firewall": self.entry.title,
+                        "firewall": self._firewall_names(),
                         "expires": cert["expires"][:10],
                         "days": str(abs(cert["days_left"])),
                     },
                 }
+
+    def _firewall_names(self) -> str:
+        """Certificates live in the shared config, so name every unit."""
+        return " & ".join(u.config.hostname for u in self.entry.runtime_data.units)
 
     def _licences(self, wanted: dict[str, dict[str, Any]], known: set[str]) -> None:
         today = dt_util.now().date()
@@ -190,6 +194,7 @@ class PanOSRepairs:
                     "key": f"update_{kind}",
                     "placeholders": {
                         "version": version,
+                        "names": " & ".join(h for h, _ in units),
                         "firewalls": ", ".join(f"{h} ({i})" for h, i in units),
                     },
                 }

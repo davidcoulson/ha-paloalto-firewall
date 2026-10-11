@@ -1073,6 +1073,7 @@ async def test_repairs(hass: HomeAssistant, fake, freezer) -> None:
     assert len(gp) == 1 and gp[0].severity == ir.IssueSeverity.WARNING
     assert gp[0].translation_placeholders == {
         "version": "6.3.3-c1199",
+        "names": "fw1 & fw2",
         "firewalls": "fw1 (6.3.3-c1046), fw2 (6.3.3-c1046)",
     }
     panos = [i for k, i in found.items() if k.startswith("update_panos")]
