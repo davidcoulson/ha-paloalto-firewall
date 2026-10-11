@@ -178,8 +178,9 @@ Problems that need a person show up under **Settings → Repairs** and clear the
 - a certificate that expires within 30 days (warning) or has expired (error)
 - a licence that expires within 30 days or has expired (the warranty isn't counted)
 - an HA pair whose running config stays out of sync for 15 minutes (a commit's brief resync is ignored)
+- a newer PAN-OS release in your installed feature train, or a newer GlobalProtect client, with the firewalls it applies to (one repair per version)
 
-Available updates aren't repeated as repairs; they're already in Settings → Updates.
+The update repairs exist because the update entities are read-only, and Home Assistant only lists installable updates on the Settings page (read-only ones are under Settings → System → Updates, *not installable*). Content updates aren't raised; the firewall's dynamic-update schedule normally installs them.
 
 ### Certificates
 

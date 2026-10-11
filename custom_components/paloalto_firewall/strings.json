@@ -346,6 +346,14 @@
     "ha_config_unsynced": {
       "title": "{firewall} config is out of sync with its HA peer",
       "description": "The running configuration on {firewall} has been {state} since {since}. A failover now would run the peer on a different config. Check Dashboard > High Availability, and use Sync to peer from the active firewall if needed."
+    },
+    "update_panos": {
+      "title": "PAN-OS {version} is available",
+      "description": "PAN-OS {version} is the newest release in the feature train installed on: {firewalls}.\n\nRead the release notes, then download and install it under Device > Software (on an HA pair, upgrade the passive firewall first). Home Assistant can't install it: the integration's account is read-only."
+    },
+    "update_gpclient": {
+      "title": "GlobalProtect client {version} is available",
+      "description": "GlobalProtect client {version} is available for the portal on: {firewalls}.\n\nDownload and activate it under Device > GlobalProtect Client on each firewall. Home Assistant can't do this: PAN-OS only lets a superuser activate a client package. GlobalProtect apps then upgrade according to the portal's app upgrade setting."
     }
   }
 }

@@ -1068,6 +1068,17 @@ async def test_repairs(hass: HomeAssistant, fake, freezer) -> None:
     assert not any(k.startswith("licence_") and "warranty" in k.lower() for k in found)
     assert not any(k.startswith("ha_config_unsynced") for k in found)
 
+    # Updates the read-only account can't install are raised once per version.
+    gp = [i for k, i in found.items() if k.startswith("update_gpclient")]
+    assert len(gp) == 1 and gp[0].severity == ir.IssueSeverity.WARNING
+    assert gp[0].translation_placeholders == {
+        "version": "6.3.3-c1199",
+        "firewalls": "fw1 (6.3.3-c1046), fw2 (6.3.3-c1046)",
+    }
+    panos = [i for k, i in found.items() if k.startswith("update_panos")]
+    assert [i.translation_placeholders["version"] for i in panos] == ["11.1.6-h3"]
+    assert not any(k.startswith("update_content") for k in found)
+
     # A brief desync (e.g. during a commit) is ignored; a lasting one is raised.
     fake.sync = "synchronization in progress"
     await _tick(hass, freezer, 61)

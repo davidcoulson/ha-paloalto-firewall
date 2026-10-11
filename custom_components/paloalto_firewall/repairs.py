@@ -1,9 +1,13 @@
 """Raise firewall problems that need a person as Home Assistant repair issues.
 
-Expiring or expired certificates and licences, and an HA pair whose config
-stays out of sync, appear under Settings -> Repairs and clear themselves once
-fixed. Available software updates are not repeated here: the update entities
-already put them in Settings -> Updates.
+Expiring or expired certificates and licences, an HA pair whose config
+stays out of sync, and PAN-OS / GlobalProtect client releases waiting to be
+installed appear under Settings -> Repairs and clear themselves once fixed.
+
+Updates are raised here because the update entities are read-only (the API
+account can't install anything), and Home Assistant's Settings -> Updates list
+only shows updates it can install. Content updates are left out: the
+firewall's own dynamic-update schedule normally installs those.
 """
 
 from __future__ import annotations
@@ -18,7 +22,7 @@ from homeassistant.util import dt as dt_util
 from .const import CERT_WARN_DAYS, DOMAIN, HA_SYNC_GRACE_MINUTES, LICENCE_WARN_DAYS
 from .coordinator import PanOSConfigEntry
 from .network import name_key, safe_key
-from .parsers import certs_expiring
+from .parsers import certs_expiring, gp_version_key, latest_gp_client, latest_panos, panos_version_key
 
 
 class PanOSRepairs:
@@ -48,6 +52,7 @@ class PanOSRepairs:
         self._certificates(wanted, known)
         self._licences(wanted, known)
         self._ha_sync(wanted, known)
+        self._updates(wanted, known)
 
         registry = ir.async_get(self.hass)
         for (domain, issue_id), _issue in list(registry.issues.items()):
@@ -152,6 +157,44 @@ class PanOSRepairs:
                 }
         if all_current:
             known.add("hasync")
+
+    def _updates(self, wanted: dict[str, dict[str, Any]], known: set[str]) -> None:
+        kinds = (
+            ("panos", "software", "sw_version", latest_panos, panos_version_key),
+            ("gpclient", "gp_client", "gp_client_version", latest_gp_client, gp_version_key),
+        )
+        all_current = True
+        # kind -> newest version -> [(hostname, installed)]
+        pending: dict[str, dict[str, list[tuple[str, str]]]] = {k[0]: {} for k in kinds}
+        for unit in self.entry.runtime_data.units:
+            checks = unit.updates.data
+            system = (unit.coordinator.data or {}).get("system")
+            if checks is None or system is None:
+                all_current = False
+                continue
+            for kind, section, installed_key, latest_fn, key_fn in kinds:
+                installed = system.get(installed_key)
+                versions = (checks.get(section) or {}).get("versions")
+                if not installed or installed == "0.0.0" or versions is None:
+                    continue
+                train = latest_fn(versions, installed)["train"]
+                if train is None:
+                    continue
+                newest, current = key_fn(train["version"]), key_fn(installed)
+                if newest is not None and current is not None and newest > current:
+                    pending[kind].setdefault(train["version"], []).append((unit.config.hostname, installed))
+        for kind, by_version in pending.items():
+            for version, units in by_version.items():
+                wanted[f"{self.prefix}update_{kind}_{name_key(version)}"] = {
+                    "severity": ir.IssueSeverity.WARNING,
+                    "key": f"update_{kind}",
+                    "placeholders": {
+                        "version": version,
+                        "firewalls": ", ".join(f"{h} ({i})" for h, i in units),
+                    },
+                }
+        if all_current:
+            known.add("update")
 
 
 @callback
