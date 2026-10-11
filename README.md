@@ -2,6 +2,14 @@
 
 [![CI](https://github.com/davidcoulson/ha-paloalto-firewall/actions/workflows/ci.yml/badge.svg)](https://github.com/davidcoulson/ha-paloalto-firewall/actions/workflows/ci.yml)
 
+## TL;DR
+
+- **Your Palo Alto firewall's health on a Home Assistant dashboard.** CPU, memory, temperature, sessions, throughput, VPN users and tunnels, without logging in to the firewall.
+- **Built for HA pairs.** Two firewalls in an active/passive pair act as one: it shows which one is active, alerts on failover, and keeps graphs continuous when they swap.
+- **Warns you before things bite.** Problems with the pair, hardware alarms, licences about to expire, certificates, and new PAN-OS or content updates (shown only; it never installs anything).
+- **Handy lookups for troubleshooting.** Route, session, ARP/DHCP and policy lookups as actions, plus configuration backups.
+- **Read-only and safe.** It uses a dedicated API account that can only read, and it is set up entirely in the UI.
+
 Monitors PAN-OS firewalls over the XML API — standalone, or an **active/passive HA pair** treated as one unit.
 
 Built as a modern replacement for [FoUStep/ha-pan-customintegration](https://github.com/FoUStep/ha-pan-customintegration) (itself a fork of Skalavala's 2018 sensor). It reuses the same operational commands but adds a UI config flow, async polling, devices, HA-pair awareness and update/licence tracking.
