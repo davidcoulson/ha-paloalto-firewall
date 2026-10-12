@@ -136,6 +136,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: PanOSConfigEntry) -> boo
     )
     errors = [r for r in results if isinstance(r, BaseException)]
     if len(errors) == len(units):
+        # Save any key made before failing, now, so no timer outlives this
+        # attempt (it could recreate the file after the entry is removed).
+        await key_store.async_save({"credential": credential, "keys": dict(keys)})
         for err in errors:
             if isinstance(err, ConfigEntryAuthFailed):
                 raise err

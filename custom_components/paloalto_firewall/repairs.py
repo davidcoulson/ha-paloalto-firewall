@@ -85,7 +85,9 @@ class PanOSRepairs:
         for kind, severity in (("expiring", ir.IssueSeverity.WARNING), ("expired", ir.IssueSeverity.ERROR)):
             for cert in split[kind]:
                 # Several certificates can share a CN (renewals, scopes): key by serial too.
-                wanted[f"{self.prefix}cert_{name_key(cert['name'], cert.get('serial'))}"] = {
+                wanted[
+                    f"{self.prefix}cert_{name_key(cert['name'], cert.get('serial'), cert.get('issuer'))}"
+                ] = {
                     "severity": severity,
                     "key": f"certificate_{kind}",
                     "placeholders": {

@@ -168,8 +168,12 @@ class PanOSClient:
 
     async def _finish_log_job(self, job: str, key: str) -> None:
         try:
-            await self._request({"type": "log", "action": "finish", "job-id": job}, key, LOG_FINISH_TIMEOUT)
-        except PanOSError as err:
+            # Bounds the whole cleanup, including waiting for a request slot.
+            async with asyncio.timeout(LOG_FINISH_TIMEOUT):
+                await self._request(
+                    {"type": "log", "action": "finish", "job-id": job}, key, LOG_FINISH_TIMEOUT
+                )
+        except (PanOSError, TimeoutError) as err:
             _LOGGER.debug("Could not stop log job %s on %s: %s", job, self.host, err)
 
     def _is_forbidden(self, key: str) -> bool:

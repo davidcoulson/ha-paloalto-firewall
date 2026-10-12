@@ -17,7 +17,7 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.util import dt as dt_util
 
-from .const import CERT_WARN_DAYS
+from .const import CERT_WARN_DAYS, DOMAIN, lr_identifier
 from .coordinator import PanOSConfigEntry
 from .entity import PanOSNetworkEntity, PanOSPairEntity, PanOSUnitEntity, PanOSUpdatesEntity
 from .network import lr_device_info, migrate_unique_id, name_key, pm_key_suffix, safe_key
@@ -233,6 +233,7 @@ def network_binary_sensors(entry: PanOSConfigEntry) -> list[BinarySensorEntity]:
                 "binary_sensor",
                 f"{entry.entry_id}_defroute_{safe_key(lr)}_{family}",
                 f"{entry.entry_id}_defroute_{name_key(lr)}_{family}",
+                device_identifier=(DOMAIN, lr_identifier(entry.entry_id, lr)),
             )
             entities.append(PanOSDefaultRouteSensor(entry, lr, family, lr_device_info(entry, lr)))
     for key, group in data["path_groups"].items():

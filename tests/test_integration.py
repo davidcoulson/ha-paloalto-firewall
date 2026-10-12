@@ -1025,12 +1025,11 @@ async def test_backup_config(hass: HomeAssistant, fake, freezer, tmp_path) -> No
     assert first["folder"] == str(root)
     assert set(first["firewalls"]) == {"fw1", "fw2"} and first["errors"] == {}
     fw1_dir = root / "0123456789001"
-    # The legacy file moved into fw1's own folder, next to the new backup.
-    assert not (root / "fw1_20261001-031500.xml").exists()
+    # The v0.8 file is left alone: its hostname doesn't prove which firewall it's from.
+    assert (root / "fw1_20261001-031500.xml").exists()
     fw1_files = sorted(p.name for p in fw1_dir.iterdir())
-    assert fw1_files[0] == "fw1_20261001-031500.xml"
-    assert len(fw1_files) == 2 and fw1_files[1].startswith("fw1_") and fw1_files[1].endswith("Z.xml")
-    text = (fw1_dir / fw1_files[1]).read_text()
+    assert len(fw1_files) == 1 and fw1_files[0].startswith("fw1_") and fw1_files[0].endswith("Z.xml")
+    text = (fw1_dir / fw1_files[0]).read_text()
     assert text.startswith('<?xml version="1.0"?>\n<config version="11.1.0">')
     assert "<hostname>fw1</hostname>" in text
     assert next(p.name for p in (root / "0123456789002").iterdir()).startswith("fw2_")
@@ -1039,7 +1038,7 @@ async def test_backup_config(hass: HomeAssistant, fake, freezer, tmp_path) -> No
     freezer.tick(timedelta(hours=1))
     again = await hass.services.async_call(DOMAIN, "backup_config", {}, blocking=True, return_response=True)
     assert again["firewalls"]["fw1"]["unchanged"] is True
-    assert len(list(fw1_dir.iterdir())) == 2
+    assert len(list(fw1_dir.iterdir())) == 1
 
     # Changed config is saved, and keep prunes only this firewall's older copies.
     fake.units["fw1.lan"]["hostname"] = "fw1-renamed"
@@ -1052,7 +1051,7 @@ async def test_backup_config(hass: HomeAssistant, fake, freezer, tmp_path) -> No
     assert third["firewalls"]["fw1"]["unchanged"] is False
     assert sorted(third["firewalls"]["fw1"]["pruned"]) == fw1_files
     assert [p.name for p in fw1_dir.iterdir()] == [third["firewalls"]["fw1"]["file"].split("/")[-1]]
-    assert other.exists()
+    assert other.exists() and (root / "fw1_20261001-031500.xml").exists()
     assert not list(fw1_dir.glob(".*.tmp"))
 
     # Overlapping calls don't trip over each other.
@@ -1376,12 +1375,31 @@ async def test_log_query_is_bounded_and_cleaned_up(hass: HomeAssistant, fake, mo
 
 
 async def test_default_route_learned_distances(hass: HomeAssistant, fake, freezer) -> None:
+    from homeassistant.helpers import device_registry as dr
     from homeassistant.helpers import entity_registry as er
 
-    # A pre-0.9.1 entity keyed by the lossy slug keeps its entity_id.
+    # A pre-0.9.1 entity keyed by the lossy slug keeps its entity_id, but only
+    # an entity on that router's own device is moved.
     reg = er.async_get(hass)
+    host = MockConfigEntry(domain="other_integration")
+    host.add_to_hass(hass)
+    devices = dr.async_get(hass)
+    wan_b = devices.async_get_or_create(
+        config_entry_id=host.entry_id, identifiers={(DOMAIN, "e1_lr_wan-b-vr")}
+    )
     old = reg.async_get_or_create(
-        "binary_sensor", DOMAIN, "e1_defroute_wan_b_vr_ipv4", suggested_object_id="my_wan_b_route"
+        "binary_sensor",
+        DOMAIN,
+        "e1_defroute_wan_b_vr_ipv4",
+        suggested_object_id="my_wan_b_route",
+        device_id=wan_b.id,
+    )
+    stray = reg.async_get_or_create(
+        "binary_sensor",
+        DOMAIN,
+        "e1_defroute_wan_a_vr_ipv6",
+        suggested_object_id="stray",
+        device_id=wan_b.id,  # on the wrong router's device
     )
     # A BGP-learned default at distance 20 is the router's normal route.
     fake.default_routes["wan-b-vr"]["ipv4"].update(distance=20)
@@ -1390,6 +1408,7 @@ async def test_default_route_learned_distances(hass: HomeAssistant, fake, freeze
     migrated = reg.async_get(old.entity_id)
     assert migrated is not None and migrated.unique_id != "e1_defroute_wan_b_vr_ipv4"
     assert hass.states.get(old.entity_id).state == "off"
+    assert reg.async_get(stray.entity_id).unique_id == "e1_defroute_wan_a_vr_ipv6"  # not taken
 
     # No default route at all: unknown, not "normal".
     del fake.default_routes["wan-a-vr"]["ipv4"]
@@ -1471,3 +1490,60 @@ async def test_gp_migration_checks_the_original_name(hass: HomeAssistant, fake) 
     fake.gp_online = {"a.b", "a_b"}
     await _setup(hass, fake, entry_id="e2")
     assert hass.states.get(old.entity_id).attributes["friendly_name"].endswith("a_b")
+
+
+async def test_threats_wait_through_a_slow_start(hass: HomeAssistant, fake, freezer) -> None:
+    from homeassistant.const import EVENT_HOMEASSISTANT_STARTED
+    from homeassistant.core import CoreState
+
+    hass.set_state(CoreState.starting)
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        unique_id="0123456789001_0123456789002",
+        data={
+            CONF_NAME: "Edge",
+            CONF_USERNAME: "u",
+            CONF_PASSWORD: "p",
+            CONF_VERIFY_SSL: False,
+            CONF_UNITS: [
+                {"host": h, "serial": u["serial"], "hostname": u["hostname"], "model": "PA-440"}
+                for h, u in fake.units.items()
+            ],
+        },
+    )
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    for _ in range(4):  # several scan intervals while Home Assistant is still starting
+        await _tick(hass, freezer, 61)
+    assert ("fw1.lan", "log:threat") not in fake.calls
+    hass.set_state(CoreState.running)
+    hass.bus.async_fire(EVENT_HOMEASSISTANT_STARTED)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert ("fw1.lan", "log:threat") in fake.calls
+
+
+async def test_threat_offset_uses_when_the_clock_was_read(hass: HomeAssistant, fake, freezer) -> None:
+    """A status sample read 10 minutes ago still gives the right offset."""
+    from custom_components.paloalto_firewall.parsers import firewall_utc_offset
+
+    fake.clock = dt_util.utcnow().strftime("%a %b %d %H:%M:%S %Y")  # firewall on UTC
+    entry = await _setup(hass, fake)
+    status = entry.runtime_data.units[0].coordinator.data
+    freezer.tick(timedelta(minutes=10))
+    assert firewall_utc_offset(status["system"]["time"], status["fetched_at"]) == 0
+    assert entry.runtime_data.threats._utc_offset(entry.runtime_data.units[0]) == 0
+
+
+async def test_repeated_full_reads_do_not_extend_the_cap(
+    hass: HomeAssistant, fake, freezer, monkeypatch
+) -> None:
+    from custom_components.paloalto_firewall import threats
+
+    monkeypatch.setattr(threats, "FIRST_READ", 10)
+    monkeypatch.setattr(threats, "POLL_READ", 2)
+    fake.threats["fw1.lan"] = [_threat(i) for i in range(1, 4)]
+    await _setup(hass, fake)
+    assert hass.states.get("sensor.edge_ha_pair_threats_24h").attributes["count_capped"] is False
+    for _ in range(3):  # each later read returns 2 already-known entries: no gap
+        await _tick(hass, freezer, 61)
+    assert hass.states.get("sensor.edge_ha_pair_threats_24h").attributes["count_capped"] is False

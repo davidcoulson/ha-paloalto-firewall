@@ -124,8 +124,10 @@ class PanOSThreatCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     def _utc_offset(self, unit: Any) -> int | None:
         """The firewall's UTC offset, from its own clock (always read during setup)."""
-        system = (unit.coordinator.data or {}).get("system") or {}
-        offset = firewall_utc_offset(system.get("time"), dt_util.utcnow())
+        status = unit.coordinator.data or {}
+        system = status.get("system") or {}
+        # Compare the clock with when it was read, not now: the sample may be minutes old.
+        offset = firewall_utc_offset(system.get("time"), status.get("fetched_at") or dt_util.utcnow())
         if offset is None:
             network = self.config_entry.runtime_data.network
             offset = (network.data or {}).get("utc_offset_minutes") if network else None
@@ -141,6 +143,7 @@ class PanOSThreatCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._incomplete_until = None
         self._unit = unit.config.hostname
         first = self._last_seq is None
+        prev_last = self._last_seq or 0
         nlogs = FIRST_READ if first else POLL_READ
         try:
             entries = await unit.client.log_query("threat", THREAT_QUERY, nlogs=nlogs, timeout=60)
@@ -177,8 +180,9 @@ class PanOSThreatCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         now = dt_util.utcnow()
         cutoff = now - timedelta(seconds=KEEP)
-        if len(entries) >= nlogs:
-            # The read hit its limit, so older matching entries were skipped.
+        if len(entries) >= nlogs and (first or (threats and threats[0]["seqno"] > prev_last)):
+            # The read hit its limit without reaching entries already seen, so
+            # older matching entries were skipped.
             # That only matters if the oldest one returned is still inside the
             # 24 h window; the count is then a lower bound until it ages out.
             times = [datetime.fromisoformat(t["time"]) for t in threats if t["time"]]

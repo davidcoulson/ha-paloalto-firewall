@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import glob
 import ipaddress
 import os
 import re
@@ -577,23 +576,15 @@ def _write_backup(
     folder = root / _safe(serial)
     folder.mkdir(parents=True, exist_ok=True)
     host = _safe(hostname)
-    # Backups from v0.8.x lived at the top level as <hostname>_<local time>.xml.
-    legacy = re.compile(_LEGACY_RE.format(host=re.escape(host)))
-    for old in root.glob(f"{glob.escape(host)}_*.xml"):
-        if legacy.match(old.name):
-            old.replace(folder / old.name)
 
+    # v0.8.x backups at the top level are left alone: a hostname doesn't say
+    # which firewall (or config entry) they came from, so they're never
+    # moved or pruned here.
     def stamp_of(path: Path) -> str:
         m = _BACKUP_RE.match(path.name)
-        if m:
-            return m["stamp"]
-        # Legacy local-time names sort before every UTC one.
-        return "0" + path.stem.rsplit("_", 1)[-1]
+        return m["stamp"] if m else ""
 
-    existing = sorted(
-        (p for p in folder.glob("*.xml") if _BACKUP_RE.match(p.name) or legacy.match(p.name)),
-        key=stamp_of,
-    )
+    existing = sorted((p for p in folder.glob("*.xml") if _BACKUP_RE.match(p.name)), key=stamp_of)
     if existing and existing[-1].read_text(encoding="utf-8") == text:
         target, unchanged = existing[-1], True
     else:

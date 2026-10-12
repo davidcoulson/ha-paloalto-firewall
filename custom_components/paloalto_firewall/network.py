@@ -158,7 +158,12 @@ def cert_uid_suffix(name: str, vsys: Any) -> str:
 
 
 def migrate_unique_id(
-    hass: HomeAssistant, domain: str, old: str, new: str, original_name: str | None = None
+    hass: HomeAssistant,
+    domain: str,
+    old: str,
+    new: str,
+    original_name: str | None = None,
+    device_identifier: tuple[str, str] | None = None,
 ) -> None:
     """Move an entity to a new unique id, keeping its entity_id and customisations.
 
@@ -176,6 +181,13 @@ def migrate_unique_id(
     entity = registry.async_get(entity_id)
     if original_name is not None and entity and entity.original_name not in (None, original_name):
         return
+    if device_identifier is not None:
+        # Only move it if it belongs to the device it's being migrated for.
+        from homeassistant.helpers import device_registry as dr
+
+        device = dr.async_get(hass).async_get(entity.device_id) if entity and entity.device_id else None
+        if device is None or device_identifier not in device.identifiers:
+            return
     registry.async_update_entity(entity_id, new_unique_id=new)
 
 
@@ -340,7 +352,9 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             # disconnecting.
             self._fire_gp_events(data["gp_users"], unit_changed)
         system = (unit.coordinator.data or {}).get("system") or {}
-        offset = parsers.firewall_utc_offset(system.get("time"), now)
+        offset = parsers.firewall_utc_offset(
+            system.get("time"), (unit.coordinator.data or {}).get("fetched_at") or now
+        )
         if offset is not None:
             self._utc_offset = offset
         data["utc_offset_minutes"] = self._utc_offset

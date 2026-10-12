@@ -220,7 +220,7 @@ Read with `show sslmgr-store config-ca-certificate` and `config-certificate-info
 
 ## Back up the configuration
 
-`paloalto_firewall.backup_config` saves each firewall's running configuration (`show config running`) as XML in the `paloalto_firewall_backups` folder of your Home Assistant config, one subfolder per firewall (by serial number), named `<hostname>_<UTC time>.xml`. Backups from v0.8 (saved at the top level) are moved into their firewall's folder the first time it runs. Home Assistant's own backups then include it. A firewall whose config hasn't changed since its newest backup isn't saved again, and `keep` (default 30) caps how many are kept per firewall. Run it from a nightly automation:
+`paloalto_firewall.backup_config` saves each firewall's running configuration (`show config running`) as XML in the `paloalto_firewall_backups` folder of your Home Assistant config, one subfolder per firewall (by serial number), named `<hostname>_<UTC time>.xml`. Backups made by v0.8 sit at the top level of that folder; they're left alone (never moved or pruned), so delete them yourself when you no longer need them. Home Assistant's own backups then include it. A firewall whose config hasn't changed since its newest backup isn't saved again, and `keep` (default 30) caps how many are kept per firewall. Run it from a nightly automation:
 
 ```yaml
 triggers:
