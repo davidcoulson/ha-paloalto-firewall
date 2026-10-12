@@ -616,9 +616,9 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         """Per router/family: the selected default route, whether it's a backup, recent changes.
 
         A change is a switch to or from a floating backup route (one whose
-        distance is above the usual), a new next hop, the route vanishing or
-        returning, or the same route being re-installed (its uptime restarting,
-        as happens when a DHCP/RA-learned route is withdrawn and learned again).
+        distance is above the usual), a new next hop, or the route vanishing or
+        returning. The route's uptime is not used: an RA-learned route's uptime
+        restarts with every router advertisement, so it doesn't reveal outages.
         """
         keys = {(lr, fam) for lr, fams in routes.items() for fam in fams} | set(self._route_prev)
         out: dict[str, dict[str, Any]] = {}
@@ -632,7 +632,7 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             on_backup = bool(cur and (cur.get("distance") or 0) > base)
             change = None
             if key in self._route_prev:
-                prev, seen_at = self._route_prev[key]
+                prev, _seen_at = self._route_prev[key]
                 was_backup = bool(prev and (prev.get("distance") or 0) > base)
                 if prev and not cur:
                     change = "lost"
@@ -643,8 +643,6 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                         change = "backup" if on_backup else "primary"
                     elif (cur["interface"], cur["nexthop"]) != (prev["interface"], prev["nexthop"]):
                         change = "nexthop_changed"
-                    elif _reinstalled(prev, cur, (now - seen_at).total_seconds()):
-                        change = "reinstalled"
                 if change:
                     self._record_route_change(lr, fam, change, prev, cur, now)
             self._route_prev[key] = (cur, now)
@@ -712,15 +710,6 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                         },
                     )
                 self._prev_egress[key] = cur_if
-
-
-def _reinstalled(prev: dict[str, Any], cur: dict[str, Any], elapsed: float) -> bool:
-    """The route's uptime went backwards: it was removed and installed again."""
-    before, now = prev.get("uptime_seconds"), cur.get("uptime_seconds")
-    if before is None or now is None:
-        return False
-    # Long uptimes are shown to the minute; allow for that and poll jitter.
-    return now + 120 < before + elapsed
 
 
 def _local_addresses(interfaces: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:

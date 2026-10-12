@@ -108,7 +108,7 @@ These are read from the **active** firewall and live under the HA pair device (o
 | Path monitor *interface* via *next hop* | one connectivity sensor per monitored next hop; monitored routes and probe results as attributes |
 | FIB routes | IPv4/IPv6 route counts (diagnostic) |
 | BGP peers established | count of Established peers; `down` lists the rest, `peers` every peer's state (BGP-enabled logical routers only) |
-| IPv4 / IPv6 backup default route | on while the router's selected default route (0.0.0.0/0, ::/0) is a floating backup, i.e. its admin distance is above the usual 10; interface, next hop, protocol, distance, route uptime, `changes_24h` and the last change as attributes (routers with a default route only) |
+| IPv4 / IPv6 backup default route | on while the router's selected default route (0.0.0.0/0, ::/0) is a floating backup, i.e. its admin distance is above the usual 10; interface, next hop, protocol, distance, `changes_24h` and the last change as attributes (routers with a default route only) |
 | BGP *peer* | one connectivity sensor per BGP peer, on while Established; peer/local IP, AS numbers, peer group, uptime, accepted/sent prefixes per address family and last reset reason as attributes |
 
 When an egress changes, `paloalto_firewall_egress_change` fires with `logical_router`, `family`, `previous_interface`/`previous_zone` and `interface`/`zone`/`nexthop`. For example, to be told when internal traffic fails over between WANs:
@@ -129,8 +129,9 @@ actions:
 `paloalto_firewall_default_route_change` fires with `logical_router`, `family`, `change`, the new `interface`/`nexthop`/`distance` and the `previous_*` ones. `change` is one of:
 
 - `backup` / `primary`: the floating backup route took over, or the normal route came back
-- `reinstalled`: the same route was withdrawn and learned again (its uptime restarted). This is what a flapping DHCPv6/RA-learned route looks like even when a backup route hides the outage
 - `nexthop_changed`, `lost`, `restored`
+
+Changes are seen at the poll interval, so an outage shorter than one poll can go unnoticed. The route's uptime isn't used to detect outages: an RA-learned route's uptime restarts with every router advertisement.
 
 `paloalto_firewall_bgp_peer_change` fires when a peer enters or leaves Established, with `logical_router`, `peer`, `peer_ip`, `remote_as`, `state` and `last_reset`. Peers removed from the configuration have their entities cleaned up on the next reload.
 

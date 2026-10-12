@@ -439,7 +439,6 @@ class PanOSDefaultRouteSensor(PanOSNetworkEntity, BinarySensorEntity):
             "protocol": route.get("protocol"),
             "distance": route.get("distance"),
             "usual_distance": state["usual_distance"],
-            "route_uptime": route.get("uptime"),
             "changes_24h": state["changes_24h"],
             "last_change": state["last_change"],
             "last_change_kind": state["last_change_kind"],

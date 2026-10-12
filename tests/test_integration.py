@@ -1160,30 +1160,27 @@ async def test_backup_default_route(hass: HomeAssistant, fake, freezer) -> None:
     assert hass.states.get("binary_sensor.core_vr_ipv6_backup_default_route") is None  # no ::/0
     events = async_capture_events(hass, "paloalto_firewall_default_route_change")
 
-    # The DHCPv6/RA route is withdrawn and learned again: same route, uptime restarts.
+    # A router advertisement refreshes the RA-learned route: uptime restarts, nothing changed.
     fake.default_routes["wan-a-vr"]["ipv6"]["uptime"] = "00:00:20"
     await _tick(hass, freezer, 61)
-    assert [e.data["change"] for e in events] == ["reinstalled"]
-    assert hass.states.get(v6).attributes["changes_24h"] == 1
+    assert events == []
 
-    # It's withdrawn for longer and the floating static takes over.
+    # The RA route is withdrawn and the floating static takes over.
     fake.default_routes["wan-a-vr"]["ipv6"].update(distance=240, uptime="00:00:05")
     await _tick(hass, freezer, 61)
     state = hass.states.get(v6)
     assert state.state == "on"
     assert state.attributes["distance"] == 240 and state.attributes["usual_distance"] == 10
-    assert events[-1].data["change"] == "backup"
+    assert [e.data["change"] for e in events] == ["backup"]
     assert events[-1].data["previous_distance"] == 10
+    assert state.attributes["changes_24h"] == 1
 
     fake.default_routes["wan-a-vr"]["ipv6"].update(distance=10, uptime="00:00:10")
     await _tick(hass, freezer, 61)
     assert hass.states.get(v6).state == "off"
     assert events[-1].data["change"] == "primary"
 
-    # The route ages normally: no change.
-    fake.default_routes["wan-a-vr"]["ipv6"]["uptime"] = "00:01:11"
-    await _tick(hass, freezer, 61)
-    assert len(events) == 3
+    assert len(events) == 2
 
     # IPv4 default route gone entirely.
     del fake.default_routes["wan-b-vr"]["ipv4"]
