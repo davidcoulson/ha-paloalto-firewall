@@ -198,7 +198,7 @@ actions:
         to {{ trigger.event.data.destination }} ({{ trigger.event.data.action }})
 ```
 
-This needs **Log** enabled in the admin role's XML API settings; without it the sensor stays unavailable and the log says so. The log is read every poll (newest 100 entries), so a burst of more than 100 high/critical threats within one poll interval only raises events for the newest 100.
+This needs **Log** enabled in the admin role's XML API settings. Without it the firewall refuses the first query, a repair explains what to enable, the sensor stays unavailable, and the threat log isn't queried again until the integration is reloaded (or Home Assistant restarts). The log is read every poll (newest 100 entries), so a burst of more than 100 high/critical threats within one poll interval only raises events for the newest 100.
 
 ### Repairs
 
@@ -348,6 +348,10 @@ The Palo Alto Networks icon and logo ship in `custom_components/paloalto_firewal
 ## Options
 
 *Configure* on the integration: status poll interval (default 60 s, min 15 s) and update/licence check interval (default 6 h).
+
+### Startup
+
+Setup only waits for each firewall's status read (in parallel, 10 s timeout), so it adds a couple of seconds to Home Assistant's start. Network data (interfaces, routing, BGP, certificates) arrives in the background right after, and its entities appear with it; update checks and the threat log start once Home Assistant has finished starting. API keys are kept between restarts, so the slow keygen only runs when a key has expired. When Home Assistant stops, requests still in flight are cancelled.
 
 ### Polling tiers
 

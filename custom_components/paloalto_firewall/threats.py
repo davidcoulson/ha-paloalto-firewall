@@ -129,8 +129,10 @@ class PanOSThreatCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             raise ConfigEntryAuthFailed(str(err)) from err
         except PanOSApiError as err:
             if err.code == "403":
+                # Not an outage: report it once (warning + repair) rather
+                # than as a failed update on every start.
                 self._permission_denied(unit.config.hostname)
-                raise UpdateFailed("Log queries are not permitted for this admin role") from err
+                return {"denied": True}
             raise UpdateFailed(f"Threat log query failed: {err}") from err
         except PanOSError as err:
             raise UpdateFailed(f"Threat log query failed: {err}") from err

@@ -367,13 +367,18 @@ class PanOSThreatSensor(CoordinatorEntity[PanOSThreatCoordinator], SensorEntity)
         self._attr_device_info = DeviceInfo(identifiers={parent_identifier(entry)})
 
     @property
+    def available(self) -> bool:
+        data = self.coordinator.data
+        return super().available and bool(data) and not data.get("denied")
+
+    @property
     def native_value(self) -> int | None:
         return (self.coordinator.data or {}).get("count_24h")
 
     @property
     def extra_state_attributes(self) -> dict[str, Any] | None:
         data = self.coordinator.data
-        if not data:
+        if not data or data.get("denied"):
             return None
         return {
             "by_severity": data["by_severity"],
