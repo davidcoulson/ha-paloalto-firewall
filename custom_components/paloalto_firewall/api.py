@@ -11,6 +11,7 @@ import aiohttp
 _LOGGER = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT = 30
+LOG_POLL_SECONDS = 1
 
 
 class PanOSError(Exception):
@@ -99,16 +100,45 @@ class PanOSClient:
 
         ``vsys`` sets the target vsys for this request only (multi-vsys).
         """
-        if not self.api_key:
-            await self.generate_key(None)
         data = {"type": "op", "cmd": cmd}
         if vsys:
             data["vsys"] = vsys
+        return await self._request(data, cmd, timeout)
+
+    async def log_query(
+        self, log_type: str, query: str, nlogs: int = 100, timeout: int = DEFAULT_TIMEOUT
+    ) -> list[ET.Element]:
+        """Run a log query (newest first) and return its <entry> elements.
+
+        Log queries are asynchronous on the firewall: the first request
+        enqueues a job, which is then fetched until it finishes.
+        """
+        key = f"log:{log_type}"
+        started = await self._request(
+            {"type": "log", "log-type": log_type, "query": query, "nlogs": str(nlogs)}, key, timeout
+        )
+        job = (started.findtext("job") or "").strip()
+        if not job:
+            raise PanOSApiError(f"Log query on {self.host} returned no job")
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while True:
+            result = await self._request({"type": "log", "action": "get", "job-id": job}, key, timeout)
+            if (result.findtext("job/status") or "").strip() == "FIN":
+                return result.findall("log/logs/entry")
+            if loop.time() > deadline:
+                raise PanOSConnectionError(f"Log query on {self.host} still running after {timeout} s")
+            await asyncio.sleep(LOG_POLL_SECONDS)
+
+    async def _request(self, data: dict[str, str], key: str, timeout: int) -> ET.Element:
+        """POST with key handling; ``key`` identifies the call for role errors."""
+        if not self.api_key:
+            await self.generate_key(None)
         used_key = self.api_key
         try:
             return await self._post(data, timeout=timeout)
         except PanOSAuthError as err:
-            if cmd in self._forbidden:
+            if key in self._forbidden:
                 # Already proven to be a role restriction, not an expired key.
                 raise PanOSApiError(f"Not permitted for this admin role: {err}", "403") from err
             # API keys can expire (PAN-OS 10.2+ key lifetime) or be rotated by
@@ -119,8 +149,8 @@ class PanOSClient:
             return await self._post(data, timeout=timeout)
         except PanOSAuthError as err:
             # The password just produced a working key, so a 403 now means the
-            # admin role isn't allowed this command - not bad credentials.
-            self._forbidden.add(cmd)
+            # admin role isn't allowed this request - not bad credentials.
+            self._forbidden.add(key)
             raise PanOSApiError(f"Not permitted for this admin role: {err}", "403") from err
 
     async def _post(

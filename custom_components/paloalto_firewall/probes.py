@@ -44,6 +44,8 @@ STATIC_PROBES: dict[str, str] = {
     "gp_previous": CMD_GP_PREVIOUS,
     "certs_device": CMD_CERTS_DEVICE,
     "certs_store": CMD_CERTS_STORE,
+    "routes_ipv6": "<show><advanced-routing><route><afi>ipv6</afi></route></advanced-routing></show>",
+    "routes_ipv4": "<show><advanced-routing><route><afi>ipv4</afi></route></advanced-routing></show>",
     "drop_counters": (
         "<show><counter><global><filter><severity>drop</severity>"
         "<delta>no</delta></filter></global></counter></show>"
@@ -74,6 +76,12 @@ async def collect(client: PanOSClient) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for name, cmd in STATIC_PROBES.items():
         out[name] = await _run(client, cmd)
+
+    try:
+        entries = await client.log_query("threat", "(severity geq high)", nlogs=3, timeout=60)
+        out["threat_log"] = {"entries": [_dump(e) for e in entries]}
+    except PanOSError as err:
+        out["threat_log"] = {"error": str(err)}
 
     # Per-vsys / per-router commands, driven by what `show interface all` reports.
     try:

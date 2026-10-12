@@ -477,6 +477,8 @@ class FakePair:
         self.certs_device = CERTS_DEVICE
         self.licenses = LICENSES
         self.sync = "synchronized"
+        self.threats: dict[str, list[dict]] = {}  # host -> threat log entries
+        self.log_jobs: list[int] = []
 
     def peer(self, host):
         return next(u for h, u in self.units.items() if h != host)
@@ -569,6 +571,30 @@ class FakePair:
             )
         return parse_response(table[cmd])
 
+    def log(self, host, data):
+        """Asynchronous log query: enqueue returns a job, get returns the entries."""
+        self.calls.append((host, f"log:{data.get('log-type') or data.get('action')}"))
+        if not self.units[host]["up"]:
+            raise PanOSConnectionError(f"{host} down")
+        if self.fail.get("log:threat") == "403":
+            raise PanOSAuthError("HTTP 403")
+        if data.get("action") != "get":
+            self.log_jobs.append(int(data.get("nlogs", 20)))
+            return parse_response(
+                OK.format(f"<msg><line>query job enqueued</line></msg><job>{len(self.log_jobs)}</job>")
+            )
+        nlogs = self.log_jobs[int(data["job-id"]) - 1]
+        newest = sorted(self.threats.get(host, []), key=lambda t: -t["seqno"])[:nlogs]
+        entries = "".join(
+            "<entry>" + "".join(f"<{k}>{v}</{k}>" for k, v in t.items()) + "</entry>" for t in newest
+        )
+        return parse_response(
+            OK.format(
+                f"<job><id>{data['job-id']}</id><status>FIN</status></job>"
+                f'<log><logs count="{len(newest)}" progress="100">{entries}</logs></log>'
+            )
+        )
+
     def patch(self, monkeypatch):
         """Stand in for the HTTP layer, so the client's key handling is real."""
         from custom_components.paloalto_firewall.api import PanOSClient
@@ -593,6 +619,8 @@ class FakePair:
                 fake.keygens += 1
                 fake.respond(self.host, const.CMD_SYSTEM_INFO)  # raises if down/bad auth
                 return parse_response(OK.format("<key>KEY</key>"))
+            if data["type"] == "log":
+                return fake.log(self.host, data)
             cmd = data["cmd"]
             vsys = data.get("vsys")
             fake.last_vsys = vsys
