@@ -30,7 +30,7 @@ On the firewall (it syncs to the peer with HA config sync):
 
 1. **Device → Admin Roles → Add** — e.g. `ha-monitor`
    - *Web UI*: disable everything
-   - *XML API*: enable **Operational Requests** only (also covers the config backup)
+   - *XML API*: enable **Operational Requests** (also covers the config backup), and **Log** if you want threat alerts
    - *Command Line*: None · *REST API*: disable everything
 2. **Device → Administrators → Add** — role-based, profile `ha-monitor`, a strong password.
 3. Commit.
@@ -108,6 +108,7 @@ These are read from the **active** firewall and live under the HA pair device (o
 | Path monitor *interface* via *next hop* | one connectivity sensor per monitored next hop; monitored routes and probe results as attributes |
 | FIB routes | IPv4/IPv6 route counts (diagnostic) |
 | BGP peers established | count of Established peers; `down` lists the rest, `peers` every peer's state (BGP-enabled logical routers only) |
+| IPv4 / IPv6 backup default route | on while the router's selected default route (0.0.0.0/0, ::/0) is a floating backup, i.e. its admin distance is above the usual 10; interface, next hop, protocol, distance, route uptime, `changes_24h` and the last change as attributes (routers with a default route only) |
 | BGP *peer* | one connectivity sensor per BGP peer, on while Established; peer/local IP, AS numbers, peer group, uptime, accepted/sent prefixes per address family and last reset reason as attributes |
 
 When an egress changes, `paloalto_firewall_egress_change` fires with `logical_router`, `family`, `previous_interface`/`previous_zone` and `interface`/`zone`/`nexthop`. For example, to be told when internal traffic fails over between WANs:
@@ -124,6 +125,12 @@ actions:
     data:
       message: "Internet now via {{ trigger.event.data.zone }} (was {{ trigger.event.data.previous_zone }})"
 ```
+
+`paloalto_firewall_default_route_change` fires with `logical_router`, `family`, `change`, the new `interface`/`nexthop`/`distance` and the `previous_*` ones. `change` is one of:
+
+- `backup` / `primary`: the floating backup route took over, or the normal route came back
+- `reinstalled`: the same route was withdrawn and learned again (its uptime restarted). This is what a flapping DHCPv6/RA-learned route looks like even when a backup route hides the outage
+- `nexthop_changed`, `lost`, `restored`
 
 `paloalto_firewall_bgp_peer_change` fires when a peer enters or leaves Established, with `logical_router`, `peer`, `peer_ip`, `remote_as`, `state` and `last_reset`. Peers removed from the configuration have their entities cleaned up on the next reload.
 
@@ -170,6 +177,27 @@ actions:
 ```
 
 (`paloalto_firewall_globalprotect_disconnect` has the same fields.) Connection state follows the poll interval, so very short sessions between polls can be missed.
+
+### Threat alerts
+
+- **Threats (24h)**: high and critical threat log entries from the active firewall in the last 24 hours, with a count per severity and the 10 newest entries (threat, type, action, source/destination, application, rule, zones) as attributes.
+- `paloalto_firewall_threat` fires once for each new entry, with the same fields plus `firewall` and `seqno`. For example:
+
+```yaml
+triggers:
+  - trigger: event
+    event_type: paloalto_firewall_threat
+    event_data:
+      severity: critical
+actions:
+  - action: notify.mobile_app_phone
+    data:
+      message: >
+        {{ trigger.event.data.threat }} from {{ trigger.event.data.source }}
+        to {{ trigger.event.data.destination }} ({{ trigger.event.data.action }})
+```
+
+This needs **Log** enabled in the admin role's XML API settings; without it the sensor stays unavailable and the log says so. The log is read every poll (newest 100 entries), so a burst of more than 100 high/critical threats within one poll interval only raises events for the newest 100.
 
 ### Repairs
 
@@ -324,7 +352,7 @@ The Palo Alto Networks icon and logo ship in `custom_components/paloalto_firewal
 
 | Every poll (scan interval) | Every 5 minutes | Every 6 hours (configurable) |
 |---|---|---|
-| system/HA/session/resources, GlobalProtect current users, interfaces, FIB/egress, path monitors, interface counters | jobs, uncommitted changes, delegated prefixes + NPTv6 check, BGP peers, GlobalProtect previous users, certificates | software/content/GlobalProtect client checks, licences |
+| system/HA/session/resources, GlobalProtect current users, interfaces, FIB/egress, default routes, path monitors, interface counters, threat log | jobs, uncommitted changes, delegated prefixes + NPTv6 check, BGP peers, GlobalProtect previous users, certificates | software/content/GlobalProtect client checks, licences |
 
 The 5-minute tier also refreshes immediately after a failover, so prefix and BGP events can lag a real change by up to 5 minutes.
 
@@ -334,7 +362,7 @@ With debug logging enabled for the integration, *Download diagnostics* also incl
 
 ## Commands used
 
-`show system info`, `show high-availability state`, `show session info`, `show system resources`, `show running resource-monitor minute last 1`, `show system environmentals`, `show global-protect-gateway current-user` and `previous-user`, `show sslmgr-store config-ca-certificate` and `config-certificate-info`, `show admins`, `show vpn ipsec-sa`, `request system software check`, `request content upgrade check`, `request global-protect-client software check`, `request license info`. Only when you run the backup action: `show config running`.
+`show system info`, `show high-availability state`, `show session info`, `show system resources`, `show running resource-monitor minute last 1`, `show system environmentals`, `show global-protect-gateway current-user` and `previous-user`, `show sslmgr-store config-ca-certificate` and `config-certificate-info`, `show admins`, `show vpn ipsec-sa`, `request system software check`, `request content upgrade check`, `request global-protect-client software check`, `request license info`, `show advanced-routing route` (IPv4 and IPv6), and a threat log query (`type=log`, needs the Log permission). Only when you run the backup action: `show config running`.
 
 Commands that a model doesn't support (environmentals on VM-series, GlobalProtect when unlicensed) are skipped quietly and their entities stay unknown or aren't created.
 

@@ -1104,3 +1104,90 @@ async def test_repairs(hass: HomeAssistant, fake, freezer) -> None:
     # Unloading the entry withdraws its issues.
     assert await hass.config_entries.async_unload(entry.entry_id)
     assert issues() == {}
+
+
+def _threat(seq, minutes_ago=1, severity="high", name="Suspicious DNS Query (12345)"):
+    stamp = (dt_util.now() - timedelta(minutes=minutes_ago)).strftime("%Y/%m/%d %H:%M:%S")
+    return {
+        "seqno": seq,
+        "time_generated": stamp,
+        "severity": severity,
+        "threatid": name,
+        "subtype": "spyware",
+        "action": "sinkhole",
+        "src": "10.9.20.50",
+        "dst": "198.51.100.9",
+        "app": "dns-base",
+        "rule": "iot-out",
+        "from": "IoT",
+        "to": "Internet",
+    }
+
+
+async def test_threat_alerts(hass: HomeAssistant, fake, freezer) -> None:
+    fake.threats["fw1.lan"] = [_threat(1, 60 * 30), _threat(2, 30), _threat(3, 5, "critical")]
+    await _setup(hass, fake)
+    sensor = hass.states.get("sensor.edge_ha_pair_threats_24h")
+    # The 30-hour-old entry is outside the window; existing entries raise no events.
+    assert sensor.state == "2"
+    assert sensor.attributes["by_severity"] == {"critical": 1, "high": 1}
+    assert sensor.attributes["latest"][0]["threat"] == "Suspicious DNS Query (12345)"
+    assert sensor.attributes["latest"][0]["source"] == "10.9.20.50"
+
+    events = async_capture_events(hass, "paloalto_firewall_threat")
+    fake.threats["fw1.lan"].append(_threat(4, 0, "critical", "Cobalt Strike Beacon (86000)"))
+    await _tick(hass, freezer, 61)
+    assert [e.data["seqno"] for e in events] == [4]
+    assert events[0].data["severity"] == "critical"
+    assert events[0].data["firewall"] == "fw1"
+    assert hass.states.get("sensor.edge_ha_pair_threats_24h").state == "3"
+    await _tick(hass, freezer, 61)
+    assert len(events) == 1  # not repeated
+
+
+async def test_threat_alerts_need_log_permission(hass: HomeAssistant, fake) -> None:
+    fake.fail["log:threat"] = "403"
+    entry = await _setup(hass, fake)
+    assert entry.state is config_entries.ConfigEntryState.LOADED
+    assert hass.states.get("sensor.edge_ha_pair_threats_24h").state == "unavailable"
+
+
+async def test_backup_default_route(hass: HomeAssistant, fake, freezer) -> None:
+    await _setup(hass, fake)
+    v6 = "binary_sensor.wan_a_vr_ipv6_backup_default_route"
+    assert hass.states.get(v6).state == "off"
+    assert hass.states.get("binary_sensor.wan_b_vr_ipv4_backup_default_route").state == "off"
+    assert hass.states.get("binary_sensor.core_vr_ipv6_backup_default_route") is None  # no ::/0
+    events = async_capture_events(hass, "paloalto_firewall_default_route_change")
+
+    # The DHCPv6/RA route is withdrawn and learned again: same route, uptime restarts.
+    fake.default_routes["wan-a-vr"]["ipv6"]["uptime"] = "00:00:20"
+    await _tick(hass, freezer, 61)
+    assert [e.data["change"] for e in events] == ["reinstalled"]
+    assert hass.states.get(v6).attributes["changes_24h"] == 1
+
+    # It's withdrawn for longer and the floating static takes over.
+    fake.default_routes["wan-a-vr"]["ipv6"].update(distance=240, uptime="00:00:05")
+    await _tick(hass, freezer, 61)
+    state = hass.states.get(v6)
+    assert state.state == "on"
+    assert state.attributes["distance"] == 240 and state.attributes["usual_distance"] == 10
+    assert events[-1].data["change"] == "backup"
+    assert events[-1].data["previous_distance"] == 10
+
+    fake.default_routes["wan-a-vr"]["ipv6"].update(distance=10, uptime="00:00:10")
+    await _tick(hass, freezer, 61)
+    assert hass.states.get(v6).state == "off"
+    assert events[-1].data["change"] == "primary"
+
+    # The route ages normally: no change.
+    fake.default_routes["wan-a-vr"]["ipv6"]["uptime"] = "00:01:11"
+    await _tick(hass, freezer, 61)
+    assert len(events) == 3
+
+    # IPv4 default route gone entirely.
+    del fake.default_routes["wan-b-vr"]["ipv4"]
+    await _tick(hass, freezer, 61)
+    assert events[-1].data["change"] == "lost"
+    assert events[-1].data["logical_router"] == "wan-b-vr"
+    assert hass.states.get("binary_sensor.wan_b_vr_ipv4_backup_default_route").attributes["present"] is False

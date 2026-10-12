@@ -48,6 +48,7 @@ CMD_PATH_MONITOR = (
     "</static-route-path-monitor></advanced-routing></show>"
 )
 CMD_JOBS = "<show><jobs><all></all></jobs></show>"
+CMD_ROUTES = "<show><advanced-routing><route><afi>{}</afi></route></advanced-routing></show>"
 CMD_RUNNING_CONFIG = "<show><config><running></running></config></show>"
 CMD_PENDING_CHANGES = "<check><pending-changes></pending-changes></check>"
 CMD_PD_POOLS = "<show><dhcp><client><ipv6><pool-details>all</pool-details></ipv6></client></dhcp></show>"
@@ -75,6 +76,13 @@ CONF_AUTO_INTERFACES = "auto_interfaces"
 EVENT_EGRESS_CHANGE = f"{DOMAIN}_egress_change"
 EVENT_PREFIX_CHANGE = f"{DOMAIN}_prefix_change"
 EVENT_BGP_PEER_CHANGE = f"{DOMAIN}_bgp_peer_change"
+EVENT_DEFAULT_ROUTE_CHANGE = f"{DOMAIN}_default_route_change"
+EVENT_THREAT = f"{DOMAIN}_threat"
+THREAT_QUERY = "(severity geq high)"
+# PAN-OS's default admin distance for static routes (and DHCP/RA-learned
+# default routes): a selected default route with a higher distance is a
+# floating backup.
+STATIC_ROUTE_DISTANCE = 10
 EVENT_GP_CONNECT = f"{DOMAIN}_globalprotect_connect"
 EVENT_GP_DISCONNECT = f"{DOMAIN}_globalprotect_disconnect"
 CERT_WARN_DAYS = 30

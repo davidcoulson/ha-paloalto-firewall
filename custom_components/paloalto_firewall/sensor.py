@@ -17,14 +17,17 @@ from homeassistant.components.sensor import (
 )
 from homeassistant.const import PERCENTAGE, EntityCategory, UnitOfDataRate, UnitOfTemperature
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN
 from .coordinator import PanOSConfigEntry
 from .entity import PanOSNetworkEntity, PanOSPairEntity, PanOSUnitEntity, PanOSUpdatesEntity
-from .network import cert_uid_suffix, lr_device_info, migrate_unique_id, safe_key
+from .network import cert_uid_suffix, lr_device_info, migrate_unique_id, parent_identifier, safe_key
 from .parsers import HA_STATES
+from .threats import PanOSThreatCoordinator
 
 Data = dict[str, Any]
 
@@ -342,9 +345,42 @@ async def async_setup_entry(
         entities.extend(
             PanOSPairMirrorSensor(entry, runtime.pair, desc) for desc in UNIT_SENSORS if desc.on_pair
         )
+    if runtime.threats is not None:
+        entities.append(PanOSThreatSensor(entry))
     async_add_entities(entities)
     _track_network_entities(entry, async_add_entities)
     _track_certificates(entry, async_add_entities)
+
+
+class PanOSThreatSensor(CoordinatorEntity[PanOSThreatCoordinator], SensorEntity):
+    """High and critical threat log entries in the last 24 hours."""
+
+    _attr_has_entity_name = True
+    _attr_name = "Threats (24h)"
+    _attr_icon = "mdi:shield-alert"
+    _attr_native_unit_of_measurement = "threats"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+
+    def __init__(self, entry: PanOSConfigEntry) -> None:
+        super().__init__(entry.runtime_data.threats)
+        self._attr_unique_id = f"{entry.entry_id}_threats_24h"
+        self._attr_device_info = DeviceInfo(identifiers={parent_identifier(entry)})
+
+    @property
+    def native_value(self) -> int | None:
+        return (self.coordinator.data or {}).get("count_24h")
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        data = self.coordinator.data
+        if not data:
+            return None
+        return {
+            "by_severity": data["by_severity"],
+            "latest": data["latest"],
+            "firewall": data["firewall"],
+            "count_capped": data["capped"],
+        }
 
 
 def _track_certificates(entry: PanOSConfigEntry, async_add_entities: AddConfigEntryEntitiesCallback) -> None:

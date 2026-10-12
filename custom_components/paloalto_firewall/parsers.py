@@ -1307,3 +1307,55 @@ def firewall_utc_offset(fw_time: str | None, utc_now: datetime) -> int | None:
     minutes = (local - utc_now.replace(tzinfo=None)).total_seconds() / 60
     offset = int(round(minutes / 15) * 15)
     return offset if -14 * 60 <= offset <= 14 * 60 else None
+
+
+_DURATION_RE = re.compile(r"(?:(\d+)w)?(?:(\d+)d)?(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?")
+
+
+def route_uptime_seconds(text: str | None) -> int | None:
+    """Advanced-routing uptime: '00:00:33', '2d00h09m' or '01w4d13h'."""
+    if not text:
+        return None
+    text = text.strip()
+    if ":" in text:
+        try:
+            h, m, s = (int(x) for x in text.split(":"))
+        except ValueError:
+            return None
+        return h * 3600 + m * 60 + s
+    match = _DURATION_RE.fullmatch(text)
+    if not match or not any(match.groups()):
+        return None
+    w, d, h, m, s = (int(x or 0) for x in match.groups())
+    return (((w * 7 + d) * 24 + h) * 60 + m) * 60 + s
+
+
+def parse_default_routes(result: ET.Element) -> dict[str, dict[str, Any]]:
+    """Selected default route per logical router from `show advanced-routing route`.
+
+    {lr: {"ipv4"|"ipv6": {protocol, distance, metric, nexthop, interface,
+    uptime, uptime_seconds}}}; routers without a default route are left out.
+    The command returns the routing table as JSON inside <json>.
+    """
+    raw = result.findtext("json")
+    if raw is None:
+        raise ValueError("No route table in response")
+    table = json.loads(raw) if raw.strip() else {}
+    out: dict[str, dict[str, Any]] = {}
+    for lr, prefixes in table.items():
+        for prefix, family in (("0.0.0.0/0", "ipv4"), ("::/0", "ipv6")):
+            selected = next((r for r in prefixes.get(prefix) or [] if r.get("selected")), None)
+            if selected is None:
+                continue
+            hops = selected.get("nexthops") or []
+            hop = next((n for n in hops if n.get("active")), hops[0] if hops else {})
+            out.setdefault(lr, {})[family] = {
+                "protocol": selected.get("protocol"),
+                "distance": selected.get("distance"),
+                "metric": selected.get("metric"),
+                "nexthop": hop.get("ip"),
+                "interface": hop.get("interfaceName"),
+                "uptime": selected.get("uptime"),
+                "uptime_seconds": route_uptime_seconds(selected.get("uptime")),
+            }
+    return out

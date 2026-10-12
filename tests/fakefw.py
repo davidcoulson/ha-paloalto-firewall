@@ -299,6 +299,34 @@ def fib(core_v4_via="b"):
     return OK.format(f"<dp>dp0</dp><total>12</total><fibs>{body}</fibs>")
 
 
+def route_table(afi, defaults):
+    """`show advanced-routing route` JSON; ``defaults`` maps lr -> {family: route}."""
+    import json
+
+    prefix = "0.0.0.0/0" if afi == "ipv4" else "::/0"
+    table = {}
+    for lr, fams in defaults.items():
+        r = fams.get(afi)
+        if r is None:
+            continue
+        table[lr] = {
+            prefix: [
+                {
+                    "prefix": prefix,
+                    "protocol": "static",
+                    "selected": True,
+                    "distance": r["distance"],
+                    "metric": 10,
+                    "uptime": r["uptime"],
+                    "nexthops": [
+                        {"ip": r["nexthop"], "interfaceName": r["interface"], "active": True, "fib": True}
+                    ],
+                }
+            ]
+        }
+    return OK.format(f"<json>{json.dumps(table)}</json>")
+
+
 def path_monitor(wan_b_up=True):
     def entry(dst, nh, iface, up):
         mons = "".join(
@@ -477,6 +505,30 @@ class FakePair:
         self.certs_device = CERTS_DEVICE
         self.licenses = LICENSES
         self.sync = "synchronized"
+        self.default_routes = {
+            "wan-a-vr": {
+                "ipv4": {
+                    "distance": 10,
+                    "uptime": "2d00h09m",
+                    "nexthop": "100.64.0.1",
+                    "interface": "ethernet1/1",
+                },
+                "ipv6": {
+                    "distance": 10,
+                    "uptime": "00:05:00",
+                    "nexthop": "fe80::1",
+                    "interface": "ethernet1/1",
+                },
+            },
+            "wan-b-vr": {
+                "ipv4": {
+                    "distance": 10,
+                    "uptime": "01w4d13h",
+                    "nexthop": "203.0.113.1",
+                    "interface": "ethernet1/2",
+                },
+            },
+        }
         self.threats: dict[str, list[dict]] = {}  # host -> threat log entries
         self.log_jobs: list[int] = []
 
@@ -562,6 +614,8 @@ class FakePair:
             const.CMD_PD_POOLS: pd_pools(self.wan_b_prefix),
             const.CMD_BGP_SUMMARY: BGP_SUMMARY,
             const.CMD_RUNNING_NAT: running_nat(self.last_vsys),
+            const.CMD_ROUTES.format("ipv4"): route_table("ipv4", self.default_routes),
+            const.CMD_ROUTES.format("ipv6"): route_table("ipv6", self.default_routes),
             const.CMD_ARP_ALL: ARP,
             const.CMD_DHCP_LEASES: DHCP,
         }

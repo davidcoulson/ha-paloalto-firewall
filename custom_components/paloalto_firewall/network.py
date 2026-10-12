@@ -34,9 +34,11 @@ from .const import (
     CMD_PATH_MONITOR,
     CMD_PD_POOLS,
     CMD_PENDING_CHANGES,
+    CMD_ROUTES,
     CMD_RUNNING_NAT,
     DOMAIN,
     EVENT_BGP_PEER_CHANGE,
+    EVENT_DEFAULT_ROUTE_CHANGE,
     EVENT_EGRESS_CHANGE,
     EVENT_GP_CONNECT,
     EVENT_GP_DISCONNECT,
@@ -45,6 +47,7 @@ from .const import (
     PROBE_IPV4,
     PROBE_IPV6,
     SLOW_INTERVAL,
+    STATIC_ROUTE_DISTANCE,
     lr_identifier,
     pair_identifier,
 )
@@ -200,6 +203,10 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         self._gp_known: set[str] = set()
         self._gp_seen: dict[str, dict[str, Any]] = {}
         self._utc_offset: int | None = None
+        # (lr, family) -> (route, seen at) for default-route change tracking
+        self._route_prev: dict[tuple[str, str], tuple[dict[str, Any] | None, datetime]] = {}
+        self._route_base: dict[tuple[str, str], int] = {}
+        self._route_changes: dict[tuple[str, str], list[dict[str, Any]]] = {}
 
     async def _optional(self, unit: PanOSUnit, key: str, cmd: str, parser) -> Any:
         try:
@@ -237,10 +244,12 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             self.unit_hostname = unit.config.hostname
 
         unit_changed = unit.config.hostname != self._slow.get("unit")
-        interfaces, fib, path_monitors = await asyncio.gather(
+        interfaces, fib, path_monitors, routes_v4, routes_v6 = await asyncio.gather(
             self._optional(unit, "interfaces", CMD_INTERFACE_ALL, parsers.parse_interfaces),
             self._optional(unit, "fib", CMD_FIB, parsers.parse_fib),
             self._optional(unit, "path_monitor", CMD_PATH_MONITOR, parsers.parse_path_monitor),
+            self._optional(unit, "routes_ipv4", CMD_ROUTES.format("ipv4"), parsers.parse_default_routes),
+            self._optional(unit, "routes_ipv6", CMD_ROUTES.format("ipv6"), parsers.parse_default_routes),
         )
         # Current GlobalProtect users come from the unit's own status poll
         # rather than a second identical API call.
@@ -261,6 +270,8 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             self._prev_egress.clear()
             self._prev_prefix.clear()
             self._prev_bgp.clear()
+            self._route_prev.clear()
+            self._route_base.clear()
         fib_ok = fib is not None
         if fib is None:
             fib = prev.get("fib") or []
@@ -290,6 +301,15 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             self._fire_egress_events(data["egress"])
 
         now = dt_util.utcnow()
+        routes_ok = routes_v4 is not None and routes_v6 is not None
+        if routes_ok:
+            merged: dict[str, dict[str, Any]] = {}
+            for table in (routes_v4, routes_v6):
+                for lr, fams in (table or {}).items():
+                    merged.setdefault(lr, {}).update(fams)
+            data["default_routes"] = self._track_default_routes(merged, now)
+        else:
+            data["default_routes"] = prev.get("default_routes")
         if unit_changed or self._slow_at is None or now - self._slow_at >= self.slow_interval:
             await self._refresh_slow(unit, interfaces)
             self._slow_at = now
@@ -311,6 +331,7 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             "path_monitors": pm_ok,
             "bgp": self._slow.get("bgp_ok", False),
             "certs_device": self._slow.get("certs_device_ok", False),
+            "default_routes": routes_ok,
         }
         return data
 
@@ -589,6 +610,84 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             out[name] = {**counters, **rates}
         return out
 
+    def _track_default_routes(
+        self, routes: dict[str, dict[str, Any]], now: datetime
+    ) -> dict[str, dict[str, Any]]:
+        """Per router/family: the selected default route, whether it's a backup, recent changes.
+
+        A change is a switch to or from a floating backup route (one whose
+        distance is above the usual), a new next hop, the route vanishing or
+        returning, or the same route being re-installed (its uptime restarting,
+        as happens when a DHCP/RA-learned route is withdrawn and learned again).
+        """
+        keys = {(lr, fam) for lr, fams in routes.items() for fam in fams} | set(self._route_prev)
+        out: dict[str, dict[str, Any]] = {}
+        for lr, fam in sorted(keys):
+            key = (lr, fam)
+            cur = routes.get(lr, {}).get(fam)
+            if cur and cur.get("distance") is not None:
+                base = min(self._route_base.get(key, STATIC_ROUTE_DISTANCE), cur["distance"])
+                self._route_base[key] = base
+            base = self._route_base.get(key, STATIC_ROUTE_DISTANCE)
+            on_backup = bool(cur and (cur.get("distance") or 0) > base)
+            change = None
+            if key in self._route_prev:
+                prev, seen_at = self._route_prev[key]
+                was_backup = bool(prev and (prev.get("distance") or 0) > base)
+                if prev and not cur:
+                    change = "lost"
+                elif cur and not prev:
+                    change = "backup" if on_backup else "restored"
+                elif cur and prev:
+                    if on_backup != was_backup:
+                        change = "backup" if on_backup else "primary"
+                    elif (cur["interface"], cur["nexthop"]) != (prev["interface"], prev["nexthop"]):
+                        change = "nexthop_changed"
+                    elif _reinstalled(prev, cur, (now - seen_at).total_seconds()):
+                        change = "reinstalled"
+                if change:
+                    self._record_route_change(lr, fam, change, prev, cur, now)
+            self._route_prev[key] = (cur, now)
+            history = [c for c in self._route_changes.get(key, []) if now - c["at"] <= timedelta(days=1)]
+            self._route_changes[key] = history
+            out.setdefault(lr, {})[fam] = {
+                "route": cur,
+                "on_backup": on_backup,
+                "usual_distance": base,
+                "changes_24h": len(history),
+                "last_change": history[-1]["at"].isoformat() if history else None,
+                "last_change_kind": history[-1]["change"] if history else None,
+            }
+        return out
+
+    def _record_route_change(
+        self,
+        lr: str,
+        fam: str,
+        change: str,
+        prev: dict[str, Any] | None,
+        cur: dict[str, Any] | None,
+        now: datetime,
+    ) -> None:
+        self._route_changes.setdefault((lr, fam), []).append({"at": now, "change": change})
+        _LOGGER.warning("%s %s default route %s", lr, fam, change.replace("_", " "))
+        self.hass.bus.async_fire(
+            EVENT_DEFAULT_ROUTE_CHANGE,
+            {
+                "entry_id": self.config_entry.entry_id,
+                "firewall": self.unit_hostname,
+                "logical_router": lr,
+                "family": fam,
+                "change": change,
+                "interface": cur["interface"] if cur else None,
+                "nexthop": cur["nexthop"] if cur else None,
+                "distance": cur["distance"] if cur else None,
+                "previous_interface": prev["interface"] if prev else None,
+                "previous_nexthop": prev["nexthop"] if prev else None,
+                "previous_distance": prev["distance"] if prev else None,
+            },
+        )
+
     def _fire_egress_events(self, egress_data: dict[str, dict[str, Any]]) -> None:
         for lr, info in egress_data.items():
             for fam, version in (("ipv4", 4), ("ipv6", 6)):
@@ -613,6 +712,15 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                         },
                     )
                 self._prev_egress[key] = cur_if
+
+
+def _reinstalled(prev: dict[str, Any], cur: dict[str, Any], elapsed: float) -> bool:
+    """The route's uptime went backwards: it was removed and installed again."""
+    before, now = prev.get("uptime_seconds"), cur.get("uptime_seconds")
+    if before is None or now is None:
+        return False
+    # Long uptimes are shown to the minute; allow for that and poll jitter.
+    return now + 120 < before + elapsed
 
 
 def _local_addresses(interfaces: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:

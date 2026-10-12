@@ -70,6 +70,7 @@ class PanOSRuntimeData:
     units: list[PanOSUnit]
     pair: PanOSPairTracker | None = None
     network: Any = None  # PanOSNetworkCoordinator (network.py)
+    threats: Any = None  # PanOSThreatCoordinator (threats.py)
 
 
 def unit_device_info(entry: ConfigEntry, unit: UnitConfig, paired: bool) -> DeviceInfo:

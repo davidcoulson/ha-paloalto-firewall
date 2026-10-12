@@ -224,6 +224,9 @@ def network_binary_sensors(entry: PanOSConfigEntry) -> list[BinarySensorEntity]:
         device = lr_device_info(entry, lr)
         for peer in info["peers"]:
             entities.append(PanOSBgpPeerSensor(entry, lr, peer, device))
+    for lr, families in (data.get("default_routes") or {}).items():
+        for family in families:
+            entities.append(PanOSDefaultRouteSensor(entry, lr, family, lr_device_info(entry, lr)))
     for key, group in data["path_groups"].items():
         entities.append(
             PanOSPathMonitorSensor(entry, key, group, lr_device_info(entry, group["logical_router"]))
@@ -396,6 +399,50 @@ class PanOSBgpPeerSensor(PanOSNetworkEntity, BinarySensorEntity):
             "seconds_in_state": info["state_seconds"],
             "prefixes": info["prefixes"],
             "last_reset": info["last_reset"],
+            "firewall": self.data.get("unit"),
+        }
+
+
+class PanOSDefaultRouteSensor(PanOSNetworkEntity, BinarySensorEntity):
+    """On while the router's default route is a floating backup (higher distance)."""
+
+    _attr_icon = "mdi:routes"
+
+    def __init__(self, entry: PanOSConfigEntry, lr: str, family: str, device) -> None:
+        super().__init__(entry, f"defroute_{safe_key(lr)}_{family}", device)
+        self._lr = lr
+        self._family = family
+        self._attr_name = f"{'IPv4' if family == 'ipv4' else 'IPv6'} backup default route"
+
+    def _state(self) -> dict[str, Any] | None:
+        return ((self.data.get("default_routes") or {}).get(self._lr) or {}).get(self._family)
+
+    @property
+    def available(self) -> bool:
+        return super().available and self._state() is not None
+
+    @property
+    def is_on(self) -> bool | None:
+        state = self._state()
+        return state["on_backup"] if state else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        state = self._state()
+        if not state:
+            return None
+        route = state["route"] or {}
+        return {
+            "present": bool(state["route"]),
+            "interface": route.get("interface"),
+            "nexthop": route.get("nexthop"),
+            "protocol": route.get("protocol"),
+            "distance": route.get("distance"),
+            "usual_distance": state["usual_distance"],
+            "route_uptime": route.get("uptime"),
+            "changes_24h": state["changes_24h"],
+            "last_change": state["last_change"],
+            "last_change_kind": state["last_change_kind"],
             "firewall": self.data.get("unit"),
         }
 

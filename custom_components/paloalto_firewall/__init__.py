@@ -48,6 +48,7 @@ from .network import (
 )
 from .repairs import PanOSRepairs, async_remove_issues
 from .services import async_setup_services
+from .threats import PanOSThreatCoordinator
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
@@ -117,6 +118,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: PanOSConfigEntry) -> boo
     # Not fatal: if the interface/routing commands can't be read yet, the
     # network devices and entities are created after the first good poll.
     await runtime.network.async_refresh()
+    # Not fatal either: without the Log permission the threat sensor just
+    # stays unavailable.
+    runtime.threats = PanOSThreatCoordinator(hass, entry, scan)
+    await runtime.threats.async_refresh()
     lr_parent = pair_device or unit_devices[0]
 
     lr_devices: set[str] = set()
