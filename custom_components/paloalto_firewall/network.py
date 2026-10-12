@@ -208,9 +208,13 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         self._route_base: dict[tuple[str, str], int] = {}
         self._route_changes: dict[tuple[str, str], list[dict[str, Any]]] = {}
 
-    async def _optional(self, unit: PanOSUnit, key: str, cmd: str, parser) -> Any:
+    async def _optional(self, unit: PanOSUnit, key: str, cmd: str, parser, executor: bool = False) -> Any:
         try:
-            return parser(await unit.client.op(cmd))
+            result = await unit.client.op(cmd)
+            if executor:
+                # CPU-heavy parsing (X.509 decoding) stays off the event loop.
+                return await self.hass.async_add_executor_job(parser, result)
+            return parser(result)
         except PanOSAuthError as err:
             raise ConfigEntryAuthFailed(str(err)) from err
         except (PanOSError, ValueError) as err:
@@ -429,7 +433,7 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             self._prefix_pools(unit, interfaces),
             self._bgp(unit),
             self._optional(unit, "gp_previous", CMD_GP_PREVIOUS, parsers.parse_gp_sessions),
-            self._optional(unit, "certs_device", CMD_CERTS_DEVICE, parsers.parse_device_certs),
+            self._optional(unit, "certs_device", CMD_CERTS_DEVICE, parsers.parse_device_certs, executor=True),
             self._optional(unit, "certs_store", CMD_CERTS_STORE, parsers.parse_cert_store),
         )
         same_unit = self._slow.get("unit") == unit.config.hostname

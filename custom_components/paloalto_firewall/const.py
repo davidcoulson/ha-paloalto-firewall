@@ -104,6 +104,9 @@ SERVICE_TEST_SECURITY_POLICY = "test_security_policy"
 LOOKUP_TIMEOUT = 60
 
 UPDATE_CHECK_TIMEOUT = 120
+# Status reads (including the ones setup waits for) are quick on a healthy
+# firewall; don't let a slow one hold up Home Assistant.
+STATUS_TIMEOUT = 10
 
 
 def pair_identifier(entry_id: str) -> str:

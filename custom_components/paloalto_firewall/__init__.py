@@ -3,15 +3,24 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from datetime import timedelta
 
-from homeassistant.const import CONF_NAME, CONF_PASSWORD, CONF_USERNAME, CONF_VERIFY_SSL
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.const import (
+    CONF_NAME,
+    CONF_PASSWORD,
+    CONF_USERNAME,
+    CONF_VERIFY_SSL,
+    EVENT_HOMEASSISTANT_STOP,
+)
+from homeassistant.core import Event, HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.start import async_at_started
+from homeassistant.helpers.storage import Store
 from homeassistant.helpers.typing import ConfigType
 
 from .api import PanOSClient
@@ -63,6 +72,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: PanOSConfigEntry) -> boo
     scan = timedelta(seconds=entry.options.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL))
     update_every = timedelta(hours=entry.options.get(CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL))
 
+    # API keys from the previous run: keygen is slow on small firewalls, and
+    # an expired key is simply regenerated.
+    key_store: Store[dict[str, str]] = Store(hass, 1, f"{DOMAIN}.{entry.entry_id}.keys")
+    keys: dict[str, str] = await key_store.async_load() or {}
+
+    def _remember_key(serial: str) -> Callable[[str], None]:
+        @callback
+        def _save(key: str) -> None:
+            keys[serial] = key
+            key_store.async_delay_save(lambda: dict(keys), 1)
+
+        return _save
+
     units: list[PanOSUnit] = []
     for index, raw in enumerate(entry.data[CONF_UNITS]):
         unit = UnitConfig(
@@ -72,7 +94,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: PanOSConfigEntry) -> boo
             hostname=raw["hostname"],
             model=raw.get("model"),
         )
-        client = PanOSClient(session, unit.host, entry.data[CONF_USERNAME], entry.data[CONF_PASSWORD])
+        client = PanOSClient(
+            session,
+            unit.host,
+            entry.data[CONF_USERNAME],
+            entry.data[CONF_PASSWORD],
+            api_key=keys.get(unit.serial),
+            on_new_key=_remember_key(unit.serial),
+        )
         units.append(
             PanOSUnit(
                 config=unit,
@@ -82,7 +111,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: PanOSConfigEntry) -> boo
             )
         )
 
-    # One unit being down (e.g. mid-upgrade) must not stop the pair loading.
+    @callback
+    def _on_stop(_event: Event) -> None:
+        # Don't hold up shutdown with in-flight requests (update checks and
+        # log queries can take a minute).
+        for pan_unit in units:
+            pan_unit.client.close()
+
+    entry.async_on_unload(hass.bus.async_listen(EVENT_HOMEASSISTANT_STOP, _on_stop))
+
+    # The only reads setup waits for: each unit's status (system info, HA
+    # state), run in parallel. One unit being down (e.g. mid-upgrade) must
+    # not stop the pair loading.
     results = await asyncio.gather(
         *(u.coordinator.async_config_entry_first_refresh() for u in units),
         return_exceptions=True,
@@ -115,13 +155,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: PanOSConfigEntry) -> boo
     entry.runtime_data = runtime
 
     runtime.network = PanOSNetworkCoordinator(hass, entry, scan, entry.options.get(CONF_INTERFACES))
-    # Not fatal: if the interface/routing commands can't be read yet, the
-    # network devices and entities are created after the first good poll.
-    await runtime.network.async_refresh()
-    # Not fatal either: without the Log permission the threat sensor just
-    # stays unavailable.
     runtime.threats = PanOSThreatCoordinator(hass, entry, scan)
-    await runtime.threats.async_refresh()
     lr_parent = pair_device or unit_devices[0]
 
     lr_devices: set[str] = set()
@@ -155,12 +189,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: PanOSConfigEntry) -> boo
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     PanOSRepairs(hass, entry).async_start()
 
-    # Update checks contact the update server and can take a minute; don't
-    # hold up startup for them.
-    for pan_unit in units:
-        entry.async_create_background_task(
-            hass, pan_unit.updates.async_refresh(), f"{DOMAIN} update check {pan_unit.config.host}"
-        )
+    # Network data (interfaces, routing, BGP, certificates...) is read in the
+    # background; its devices and entities are added when the first poll
+    # lands.
+    entry.async_create_background_task(hass, runtime.network.async_refresh(), f"{DOMAIN} first network poll")
+
+    @callback
+    def _start_slow_reads(_hass: HomeAssistant) -> None:
+        # Update checks contact the update server and the threat log is a
+        # log query; both wait until Home Assistant has finished starting.
+        for pan_unit in units:
+            entry.async_create_background_task(
+                hass, pan_unit.updates.async_refresh(), f"{DOMAIN} update check {pan_unit.config.host}"
+            )
+        entry.async_create_background_task(hass, runtime.threats.async_refresh(), f"{DOMAIN} threat log")
+
+    entry.async_on_unload(async_at_started(hass, _start_slow_reads))
 
     entry.async_on_unload(entry.add_update_listener(_async_options_updated))
     return True
@@ -178,6 +222,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: PanOSConfigEntry) -> bo
 
 async def async_remove_entry(hass: HomeAssistant, entry: PanOSConfigEntry) -> None:
     async_remove_issues(hass, entry.entry_id)
+    await Store(hass, 1, f"{DOMAIN}.{entry.entry_id}.keys").async_remove()
 
 
 def _remove_stale_network_entities(hass: HomeAssistant, entry: PanOSConfigEntry) -> None:

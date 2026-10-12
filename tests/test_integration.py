@@ -1145,11 +1145,84 @@ async def test_threat_alerts(hass: HomeAssistant, fake, freezer) -> None:
     assert len(events) == 1  # not repeated
 
 
-async def test_threat_alerts_need_log_permission(hass: HomeAssistant, fake) -> None:
+async def test_threat_alerts_need_log_permission(hass: HomeAssistant, fake, freezer) -> None:
+    from homeassistant.helpers import issue_registry as ir
+
     fake.fail["log:threat"] = "403"
     entry = await _setup(hass, fake)
     assert entry.state is config_entries.ConfigEntryState.LOADED
     assert hass.states.get("sensor.edge_ha_pair_threats_24h").state == "unavailable"
+    # Refused once, without a keygen retry; a repair says what to change.
+    assert sum(1 for _, c in fake.calls if c == "log:threat") == 1
+    assert fake.keygens == 2  # one per unit at startup, none for the refusal
+    issue = ir.async_get(hass).async_get_issue(DOMAIN, f"{entry.entry_id}_permission_threat_log")
+    assert issue is not None and issue.translation_key == "threat_log_permission"
+    # ...and it isn't asked again on later polls.
+    for _ in range(3):
+        await _tick(hass, freezer, 61)
+    assert sum(1 for _, c in fake.calls if c == "log:threat") == 1
+
+    # After a reload with the permission granted, it works and the repair goes away.
+    del fake.fail["log:threat"]
+    assert await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert hass.states.get("sensor.edge_ha_pair_threats_24h").state == "0"
+    assert ir.async_get(hass).async_get_issue(DOMAIN, f"{entry.entry_id}_permission_threat_log") is None
+
+
+async def test_api_keys_are_reused_across_restarts(hass: HomeAssistant, fake, freezer, hass_storage) -> None:
+    entry = await _setup(hass, fake)
+    assert fake.keygens == 2
+    await _tick(hass, freezer, 5)  # the key store saves after a short delay
+    assert hass_storage[f"{DOMAIN}.{entry.entry_id}.keys"]["data"] == {
+        "0123456789001": "KEY",
+        "0123456789002": "KEY",
+    }
+    assert await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert fake.keygens == 2  # stored keys reused, no new keygen
+
+
+async def test_setup_waits_only_for_unit_status(hass: HomeAssistant, fake) -> None:
+    from homeassistant.const import EVENT_HOMEASSISTANT_STARTED, EVENT_HOMEASSISTANT_STOP
+    from homeassistant.core import CoreState
+
+    from custom_components.paloalto_firewall import const
+
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        unique_id="0123456789001_0123456789002",
+        data={
+            CONF_NAME: "Edge",
+            CONF_USERNAME: "u",
+            CONF_PASSWORD: "p",
+            CONF_VERIFY_SSL: False,
+            CONF_UNITS: [
+                {"host": h, "serial": u["serial"], "hostname": u["hostname"], "model": "PA-440"}
+                for h, u in fake.units.items()
+            ],
+        },
+    )
+    entry.add_to_hass(hass)
+    fake.calls.clear()
+    hass.set_state(CoreState.starting)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    # Update checks and the threat log wait until Home Assistant has started.
+    calls = {c for _, c in fake.calls}
+    assert const.CMD_SYSTEM_INFO in calls and const.CMD_INTERFACE_ALL in calls
+    assert const.CMD_SOFTWARE_CHECK not in calls
+    assert "log:threat" not in calls
+    hass.set_state(CoreState.running)
+    hass.bus.async_fire(EVENT_HOMEASSISTANT_STARTED)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    calls = {c for _, c in fake.calls}
+    assert {const.CMD_SOFTWARE_CHECK, "log:threat"} <= calls
+
+    # Stopping Home Assistant closes the clients: no further requests.
+    hass.bus.async_fire(EVENT_HOMEASSISTANT_STOP)
+    await hass.async_block_till_done()
+    assert all(u.client._closed for u in entry.runtime_data.units)
 
 
 async def test_backup_default_route(hass: HomeAssistant, fake, freezer) -> None:

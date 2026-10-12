@@ -354,6 +354,10 @@
     "update_gpclient": {
       "title": "{names}: GlobalProtect client {version} is available",
       "description": "GlobalProtect client {version} is available for the portal on: {firewalls}.\n\nHome Assistant can't install it: PAN-OS only lets a superuser activate a client package. Run these on each firewall's CLI (or use Device > GlobalProtect Client):\n\n{commands}\n\nGlobalProtect apps then upgrade according to the portal's app upgrade setting."
+    },
+    "threat_log_permission": {
+      "title": "{firewall}: threat alerts need the Log permission",
+      "description": "The firewall refused the integration's threat log query, so the Threats (24h) sensor and threat events are off.\n\nTo turn them on: **Device > Admin Roles >** the integration's role **> XML API**, enable **Log**, and commit. Then reload the Palo Alto Networks Firewall integration (or restart Home Assistant).\n\nIf you don't want threat alerts, you can ignore this."
     }
   }
 }

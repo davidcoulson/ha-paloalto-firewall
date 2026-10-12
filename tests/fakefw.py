@@ -631,7 +631,12 @@ class FakePair:
         if not self.units[host]["up"]:
             raise PanOSConnectionError(f"{host} down")
         if self.fail.get("log:threat") == "403":
-            raise PanOSAuthError("HTTP 403")
+            # What the real client raises for HTTP 403 "Type [log] not authorized for user role."
+            from custom_components.paloalto_firewall.api import PanOSApiError
+
+            raise PanOSApiError(
+                "Not permitted for this admin role: Type [log] not authorized for user role.", "403"
+            )
         if data.get("action") != "get":
             self.log_jobs.append(int(data.get("nlogs", 20)))
             return parse_response(

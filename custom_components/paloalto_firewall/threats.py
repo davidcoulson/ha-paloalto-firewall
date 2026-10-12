@@ -3,7 +3,8 @@
 Each poll reads the newest matching threat log entries. Entries newer than
 the last one seen fire a ``paloalto_firewall_threat`` event, and a sensor
 counts the last 24 hours. Needs the *Log* permission in the admin role's XML
-API settings; without it the sensor stays unavailable.
+API settings; without it the first query is refused at once, a repair issue
+explains what to change, and polling stops until the integration is reloaded.
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ from typing import Any
 
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
 
@@ -88,7 +90,28 @@ class PanOSThreatCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._unit: str | None = None
         self._last_seq: int | None = None
         self._recent: dict[int, dict[str, Any]] = {}
-        self._denied_logged = False
+        self._issue_id = f"{entry.entry_id}_permission_threat_log"
+
+    def _permission_denied(self, hostname: str) -> None:
+        """The role can't read logs: say so once and stop asking."""
+        _LOGGER.warning(
+            "Threat alerts need the Log permission in the admin role's XML API settings "
+            "(Device > Admin Roles); %s refused the log query. Threat polling is off "
+            "until the integration is reloaded",
+            hostname,
+        )
+        # No more scheduled polls; a reload (or restart) checks again.
+        self.update_interval = None
+        ir.async_create_issue(
+            self.hass,
+            DOMAIN,
+            self._issue_id,
+            is_fixable=False,
+            is_persistent=False,
+            severity=ir.IssueSeverity.WARNING,
+            translation_key="threat_log_permission",
+            translation_placeholders={"firewall": hostname},
+        )
 
     async def _async_update_data(self) -> dict[str, Any]:
         unit = pick_unit(self.config_entry)
@@ -106,18 +129,13 @@ class PanOSThreatCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             raise ConfigEntryAuthFailed(str(err)) from err
         except PanOSApiError as err:
             if err.code == "403":
-                if not self._denied_logged:
-                    self._denied_logged = True
-                    _LOGGER.warning(
-                        "Threat alerts need the Log permission in the admin role's XML API "
-                        "settings (Device > Admin Roles); %s refused the log query",
-                        unit.config.hostname,
-                    )
+                self._permission_denied(unit.config.hostname)
                 raise UpdateFailed("Log queries are not permitted for this admin role") from err
             raise UpdateFailed(f"Threat log query failed: {err}") from err
         except PanOSError as err:
             raise UpdateFailed(f"Threat log query failed: {err}") from err
 
+        ir.async_delete_issue(self.hass, DOMAIN, self._issue_id)
         network = self.config_entry.runtime_data.network
         offset = (network.data or {}).get("utc_offset_minutes") if network else None
         threats = [t for e in entries if (t := parse_threat(e, offset))]

@@ -36,6 +36,7 @@ from .const import (
     DOMAIN,
     EVENT_FAILOVER,
     MANUFACTURER,
+    STATUS_TIMEOUT,
     UPDATE_CHECK_TIMEOUT,
 )
 from .devices import get_device
@@ -116,7 +117,7 @@ class _BaseCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         key: str,
         cmd: str,
         parser: Callable[[Any], dict[str, Any]],
-        timeout: int = 30,
+        timeout: int = STATUS_TIMEOUT,
     ) -> dict[str, Any] | None:
         """Run a command whose failure should not take the device offline."""
         try:
@@ -144,7 +145,7 @@ class PanOSDeviceCoordinator(_BaseCoordinator):
 
     async def _async_update_data(self) -> dict[str, Any]:
         try:
-            system = parsers.parse_system_info(await self.client.op(CMD_SYSTEM_INFO))
+            system = parsers.parse_system_info(await self.client.op(CMD_SYSTEM_INFO, timeout=STATUS_TIMEOUT))
         except PanOSAuthError as err:
             raise ConfigEntryAuthFailed(str(err)) from err
         except (PanOSError, ValueError) as err:

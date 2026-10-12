@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import xml.etree.ElementTree as ET
+from collections.abc import Callable
+from typing import Any
 
 import aiohttp
 
@@ -12,6 +14,7 @@ _LOGGER = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT = 30
 LOG_POLL_SECONDS = 1
+LARGE_RESPONSE = 200_000
 
 
 class PanOSError(Exception):
@@ -45,6 +48,10 @@ def parse_response(text: str) -> ET.Element:
         code = root.get("code")
         message = " ".join(t.strip() for t in root.itertext() if t.strip()) or "unknown error"
         lowered = message.lower()
+        if "not authorized for user role" in lowered:
+            # The key is fine; the admin role doesn't allow this request type
+            # (e.g. "Type [log] not authorized for user role."). No keygen needed.
+            raise PanOSApiError(f"Not permitted for this admin role: {message}", "403")
         if code == "403" or "invalid credential" in lowered or "invalid key" in lowered:
             raise PanOSAuthError(message)
         raise PanOSApiError(message, code)
@@ -62,6 +69,7 @@ class PanOSClient:
         username: str,
         password: str,
         api_key: str | None = None,
+        on_new_key: Callable[[str], None] | None = None,
     ) -> None:
         self._session = session
         self.host = host.strip().rstrip("/")
@@ -75,6 +83,17 @@ class PanOSClient:
         self._sem = asyncio.Semaphore(2)
         self._key_lock = asyncio.Lock()
         self._forbidden: set[str] = set()
+        # Called with each newly generated key so it can be stored and reused
+        # on the next start (keygen is slow on small firewalls).
+        self._on_new_key = on_new_key
+        self._inflight: set[asyncio.Task[Any]] = set()
+        self._closed = False
+
+    def close(self) -> None:
+        """Refuse new requests and cancel those in flight (Home Assistant is stopping)."""
+        self._closed = True
+        for task in list(self._inflight):
+            task.cancel()
 
     async def generate_key(self, stale_key: str | None = None) -> str:
         """Get a new API key; concurrent callers share one keygen.
@@ -93,6 +112,8 @@ class PanOSClient:
             if not key:
                 raise PanOSAuthError("Firewall returned no API key")
             self.api_key = key.strip()
+            if self._on_new_key:
+                self._on_new_key(self.api_key)
             return self.api_key
 
     async def op(self, cmd: str, timeout: int = DEFAULT_TIMEOUT, vsys: str | None = None) -> ET.Element:
@@ -156,7 +177,29 @@ class PanOSClient:
     async def _post(
         self, data: dict[str, str], with_key: bool = True, timeout: int = DEFAULT_TIMEOUT
     ) -> ET.Element:
+        if self._closed:
+            raise PanOSConnectionError(f"{self.host}: shutting down")
         headers = {"X-PAN-KEY": self.api_key} if with_key and self.api_key else {}
+        task = asyncio.current_task()
+        if task is not None:
+            self._inflight.add(task)
+        try:
+            text, status = await self._send(data, headers, timeout)
+        finally:
+            if task is not None:
+                self._inflight.discard(task)
+        if status in (401, 403):
+            if "not authorized for user role" in text.lower():
+                parse_response(text)  # raises PanOSApiError(code "403"): a role limit, not a bad key
+            raise PanOSAuthError(f"HTTP {status} from {self.host}")
+        if status >= 400 and not text.lstrip().startswith("<"):
+            raise PanOSConnectionError(f"HTTP {status} from {self.host}")
+        if len(text) > LARGE_RESPONSE:
+            # e.g. the running config: parse off the event loop.
+            return await asyncio.get_running_loop().run_in_executor(None, parse_response, text)
+        return parse_response(text)
+
+    async def _send(self, data: dict[str, str], headers: dict[str, str], timeout: int) -> tuple[str, int]:
         async with self._sem:
             try:
                 async with self._session.post(
@@ -171,8 +214,4 @@ class PanOSClient:
                 raise PanOSConnectionError(
                     f"Error talking to {self.host}: {err or type(err).__name__}"
                 ) from err
-        if status in (401, 403):
-            raise PanOSAuthError(f"HTTP {status} from {self.host}")
-        if status >= 400 and not text.lstrip().startswith("<"):
-            raise PanOSConnectionError(f"HTTP {status} from {self.host}")
-        return parse_response(text)
+        return text, status
