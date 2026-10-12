@@ -1444,6 +1444,18 @@ async def test_threat_capped_flag_persists(hass: HomeAssistant, fake, freezer, m
     assert hass.states.get("sensor.edge_ha_pair_threats_24h").attributes["count_capped"] is True
 
 
+async def test_threat_cap_ignores_old_entries(hass: HomeAssistant, fake, monkeypatch) -> None:
+    """A full read of entries all older than 24 h doesn't mean today's count is short."""
+    from custom_components.paloalto_firewall import threats
+
+    monkeypatch.setattr(threats, "FIRST_READ", 3)
+    fake.threats["fw1.lan"] = [_threat(i, minutes_ago=60 * 30 + i) for i in range(1, 6)]
+    await _setup(hass, fake)
+    state = hass.states.get("sensor.edge_ha_pair_threats_24h")
+    assert state.state == "0"
+    assert state.attributes["count_capped"] is False
+
+
 async def test_gp_migration_checks_the_original_name(hass: HomeAssistant, fake) -> None:
     from homeassistant.helpers import entity_registry as er
 
