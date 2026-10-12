@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 import xml.etree.ElementTree as ET
 from collections.abc import Callable
 from typing import Any
@@ -15,6 +16,8 @@ _LOGGER = logging.getLogger(__name__)
 DEFAULT_TIMEOUT = 30
 LOG_POLL_SECONDS = 1
 LARGE_RESPONSE = 200_000
+LOG_FINISH_TIMEOUT = 10
+FORBIDDEN_TTL = 6 * 3600
 
 
 class PanOSError(Exception):
@@ -82,7 +85,9 @@ class PanOSClient:
         # Small boxes (PA-4xx) have weak management planes; don't hammer them.
         self._sem = asyncio.Semaphore(2)
         self._key_lock = asyncio.Lock()
-        self._forbidden: set[str] = set()
+        # Request kinds the admin role was shown not to allow -> when; retried
+        # with a fresh key once the verdict is old.
+        self._forbidden: dict[str, float] = {}
         # Called with each newly generated key so it can be stored and reused
         # on the next start (keygen is slow on small firewalls).
         self._on_new_key = on_new_key
@@ -132,24 +137,47 @@ class PanOSClient:
         """Run a log query (newest first) and return its <entry> elements.
 
         Log queries are asynchronous on the firewall: the first request
-        enqueues a job, which is then fetched until it finishes.
+        enqueues a job, which is then fetched until it finishes. ``timeout``
+        bounds the whole operation; a job that doesn't finish (or a query
+        that's cancelled) is stopped on the firewall rather than abandoned.
         """
         key = f"log:{log_type}"
-        started = await self._request(
-            {"type": "log", "log-type": log_type, "query": query, "nlogs": str(nlogs)}, key, timeout
-        )
-        job = (started.findtext("job") or "").strip()
-        if not job:
-            raise PanOSApiError(f"Log query on {self.host} returned no job")
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + timeout
-        while True:
-            result = await self._request({"type": "log", "action": "get", "job-id": job}, key, timeout)
-            if (result.findtext("job/status") or "").strip() == "FIN":
-                return result.findall("log/logs/entry")
-            if loop.time() > deadline:
-                raise PanOSConnectionError(f"Log query on {self.host} still running after {timeout} s")
-            await asyncio.sleep(LOG_POLL_SECONDS)
+        job: str | None = None
+        try:
+            async with asyncio.timeout(timeout):
+                started = await self._request(
+                    {"type": "log", "log-type": log_type, "query": query, "nlogs": str(nlogs)}, key, timeout
+                )
+                job = (started.findtext("job") or "").strip() or None
+                if job is None:
+                    raise PanOSApiError(f"Log query on {self.host} returned no job")
+                while True:
+                    result = await self._request(
+                        {"type": "log", "action": "get", "job-id": job}, key, timeout
+                    )
+                    if (result.findtext("job/status") or "").strip() == "FIN":
+                        job = None  # finished: nothing to clean up
+                        return result.findall("log/logs/entry")
+                    await asyncio.sleep(LOG_POLL_SECONDS)
+        except TimeoutError as err:
+            raise PanOSConnectionError(f"Log query on {self.host} still running after {timeout} s") from err
+        finally:
+            if job is not None and not self._closed:
+                # Best effort, and shielded so a cancellation can't skip it.
+                await asyncio.shield(self._finish_log_job(job, key))
+
+    async def _finish_log_job(self, job: str, key: str) -> None:
+        try:
+            await self._request({"type": "log", "action": "finish", "job-id": job}, key, LOG_FINISH_TIMEOUT)
+        except PanOSError as err:
+            _LOGGER.debug("Could not stop log job %s on %s: %s", job, self.host, err)
+
+    def _is_forbidden(self, key: str) -> bool:
+        since = self._forbidden.get(key)
+        if since is not None and time.monotonic() - since > FORBIDDEN_TTL:
+            del self._forbidden[key]
+            return False
+        return since is not None
 
     async def _request(self, data: dict[str, str], key: str, timeout: int) -> ET.Element:
         """POST with key handling; ``key`` identifies the call for role errors."""
@@ -159,7 +187,7 @@ class PanOSClient:
         try:
             return await self._post(data, timeout=timeout)
         except PanOSAuthError as err:
-            if key in self._forbidden:
+            if self._is_forbidden(key):
                 # Already proven to be a role restriction, not an expired key.
                 raise PanOSApiError(f"Not permitted for this admin role: {err}", "403") from err
             # API keys can expire (PAN-OS 10.2+ key lifetime) or be rotated by
@@ -171,7 +199,7 @@ class PanOSClient:
         except PanOSAuthError as err:
             # The password just produced a working key, so a 403 now means the
             # admin role isn't allowed this request - not bad credentials.
-            self._forbidden.add(key)
+            self._forbidden[key] = time.monotonic()
             raise PanOSApiError(f"Not permitted for this admin role: {err}", "403") from err
 
     async def _post(

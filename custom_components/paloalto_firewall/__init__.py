@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from collections.abc import Callable
 from datetime import timedelta
+from typing import Any
 
 from homeassistant.const import (
     CONF_NAME,
@@ -73,15 +75,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: PanOSConfigEntry) -> boo
     update_every = timedelta(hours=entry.options.get(CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL))
 
     # API keys from the previous run: keygen is slow on small firewalls, and
-    # an expired key is simply regenerated.
-    key_store: Store[dict[str, str]] = Store(hass, 1, f"{DOMAIN}.{entry.entry_id}.keys")
-    keys: dict[str, str] = await key_store.async_load() or {}
+    # an expired key is simply regenerated. Keys belong to the credentials
+    # that made them, so new credentials (reauth) start fresh.
+    key_store = _key_store(hass, entry.entry_id)
+    credential = hashlib.sha256(
+        f"{entry.data[CONF_USERNAME]}\0{entry.data[CONF_PASSWORD]}".encode()
+    ).hexdigest()
+    stored = await key_store.async_load() or {}
+    keys: dict[str, str] = dict(stored.get("keys") or {}) if stored.get("credential") == credential else {}
 
     def _remember_key(serial: str) -> Callable[[str], None]:
         @callback
         def _save(key: str) -> None:
             keys[serial] = key
-            key_store.async_delay_save(lambda: dict(keys), 1)
+            key_store.async_delay_save(lambda: {"credential": credential, "keys": dict(keys)}, 1)
 
         return _save
 
@@ -135,6 +142,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: PanOSConfigEntry) -> boo
         raise ConfigEntryNotReady(str(errors[0])) from errors[0]
 
     runtime = PanOSRuntimeData(name=entry.data[CONF_NAME], units=units)
+    runtime.key_store = key_store
+    runtime.keys = {"credential": credential, "keys": keys}
     pair_device = None
     if len(units) == 2:
         pair_device = ensure_device(
@@ -202,7 +211,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: PanOSConfigEntry) -> boo
             entry.async_create_background_task(
                 hass, pan_unit.updates.async_refresh(), f"{DOMAIN} update check {pan_unit.config.host}"
             )
-        entry.async_create_background_task(hass, runtime.threats.async_refresh(), f"{DOMAIN} threat log")
+        entry.async_create_background_task(hass, runtime.threats.async_start(), f"{DOMAIN} threat log")
 
     entry.async_on_unload(async_at_started(hass, _start_slow_reads))
 
@@ -215,14 +224,24 @@ async def _async_options_updated(hass: HomeAssistant, entry: PanOSConfigEntry) -
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: PanOSConfigEntry) -> bool:
-    if unloaded := await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
-        async_remove_issues(hass, entry.entry_id)
+    # Repair issues stay through a reload (so an "ignore" sticks); the next
+    # successful poll withdraws any that no longer apply. They're removed
+    # with the entry.
+    unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    if unloaded and (store := entry.runtime_data.key_store) is not None:
+        # Write now rather than on a timer that could outlive the entry
+        # (and recreate the file after it's removed).
+        await store.async_save(dict(entry.runtime_data.keys))
     return unloaded
 
 
 async def async_remove_entry(hass: HomeAssistant, entry: PanOSConfigEntry) -> None:
     async_remove_issues(hass, entry.entry_id)
-    await Store(hass, 1, f"{DOMAIN}.{entry.entry_id}.keys").async_remove()
+    await _key_store(hass, entry.entry_id).async_remove()
+
+
+def _key_store(hass: HomeAssistant, entry_id: str) -> Store[dict[str, Any]]:
+    return Store(hass, 1, f"{DOMAIN}.{entry_id}.keys", private=True)
 
 
 def _remove_stale_network_entities(hass: HomeAssistant, entry: PanOSConfigEntry) -> None:
@@ -261,7 +280,7 @@ def _remove_stale_network_entities(hass: HomeAssistant, entry: PanOSConfigEntry)
     cert_prefix = f"{entry.entry_id}_cert_"
     certs = data.get("certificates")
     cert_keep = {f"{cert_prefix}expiring"}
-    for c in (certs or {}).get("device", []):
+    for c in (certs or {}).get("device") or []:
         cert_keep.add(f"{entry.entry_id}_{cert_uid_suffix(c['name'], c.get('vsys'))}")
         # Pre-0.7.4 id; the sensor platform migrates it to the one above.
         cert_keep.add(f"{cert_prefix}{safe_key(c['name'])}")

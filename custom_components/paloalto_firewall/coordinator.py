@@ -72,6 +72,8 @@ class PanOSRuntimeData:
     pair: PanOSPairTracker | None = None
     network: Any = None  # PanOSNetworkCoordinator (network.py)
     threats: Any = None  # PanOSThreatCoordinator (threats.py)
+    key_store: Any = None  # Store of API keys (__init__.py)
+    keys: Any = None
 
 
 def unit_device_info(entry: ConfigEntry, unit: UnitConfig, paired: bool) -> DeviceInfo:
@@ -117,7 +119,7 @@ class _BaseCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         key: str,
         cmd: str,
         parser: Callable[[Any], dict[str, Any]],
-        timeout: int = STATUS_TIMEOUT,
+        timeout: int = 30,
     ) -> dict[str, Any] | None:
         """Run a command whose failure should not take the device offline."""
         try:

@@ -398,7 +398,11 @@ def _track_certificates(entry: PanOSConfigEntry, async_add_entities: AddConfigEn
     @callback
     def _add_new() -> None:
         certs = ((network.data or {}).get("certificates") or {}).get("device") or []
-        new = sorted({(c["name"], c.get("vsys")) for c in certs} - added, key=str)
+        # Shared (vsys 0) copies first: they inherit a pre-0.7.4 entity of the same name.
+        new = sorted(
+            {(c["name"], c.get("vsys")) for c in certs} - added,
+            key=lambda nv: (nv[0], nv[1] not in (None, 0), str(nv[1])),
+        )
         if new:
             added.update(new)
             for name, vsys in new:
@@ -408,6 +412,7 @@ def _track_certificates(entry: PanOSConfigEntry, async_add_entities: AddConfigEn
                     "sensor",
                     f"{entry.entry_id}_cert_{safe_key(name)}",
                     f"{entry.entry_id}_{cert_uid_suffix(name, vsys)}",
+                    original_name=f"Certificate {name}",
                 )
             async_add_entities(PanOSCertificateSensor(entry, n, v) for n, v in new)
 

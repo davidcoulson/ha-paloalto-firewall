@@ -24,6 +24,7 @@ from .api import PanOSApiError, PanOSAuthError, PanOSError
 from .const import DOMAIN, EVENT_THREAT, THREAT_QUERY
 from .coordinator import PanOSConfigEntry
 from .network import pick_unit
+from .parsers import firewall_utc_offset
 
 _LOGGER = logging.getLogger(__package__)
 
@@ -84,13 +85,21 @@ class PanOSThreatCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     config_entry: PanOSConfigEntry
 
     def __init__(self, hass: HomeAssistant, entry: PanOSConfigEntry, interval: timedelta) -> None:
-        super().__init__(
-            hass, _LOGGER, config_entry=entry, name=f"{DOMAIN} threats", update_interval=interval
-        )
+        # No polling until start(): the sensor's listener would otherwise
+        # schedule a poll one interval after setup, even mid-startup.
+        super().__init__(hass, _LOGGER, config_entry=entry, name=f"{DOMAIN} threats", update_interval=None)
+        self._interval = interval
         self._unit: str | None = None
+        self._serial: str | None = None
+        self._incomplete_until: datetime | None = None
         self._last_seq: int | None = None
         self._recent: dict[int, dict[str, Any]] = {}
         self._issue_id = f"{entry.entry_id}_permission_threat_log"
+
+    async def async_start(self) -> None:
+        """Begin polling (once Home Assistant has started)."""
+        self.update_interval = self._interval
+        await self.async_refresh()
 
     def _permission_denied(self, hostname: str) -> None:
         """The role can't read logs: say so once and stop asking."""
@@ -113,22 +122,33 @@ class PanOSThreatCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             translation_placeholders={"firewall": hostname},
         )
 
+    def _utc_offset(self, unit: Any) -> int | None:
+        """The firewall's UTC offset, from its own clock (always read during setup)."""
+        system = (unit.coordinator.data or {}).get("system") or {}
+        offset = firewall_utc_offset(system.get("time"), dt_util.utcnow())
+        if offset is None:
+            network = self.config_entry.runtime_data.network
+            offset = (network.data or {}).get("utc_offset_minutes") if network else None
+        return offset
+
     async def _async_update_data(self) -> dict[str, Any]:
         unit = pick_unit(self.config_entry)
-        if unit.config.hostname != self._unit:
+        if unit.config.serial != self._serial:
             # Sequence numbers are per firewall: start over after a failover.
-            self._unit = unit.config.hostname
+            self._serial = unit.config.serial
             self._last_seq = None
             self._recent.clear()
+            self._incomplete_until = None
+        self._unit = unit.config.hostname
         first = self._last_seq is None
+        nlogs = FIRST_READ if first else POLL_READ
         try:
-            entries = await unit.client.log_query(
-                "threat", THREAT_QUERY, nlogs=FIRST_READ if first else POLL_READ, timeout=60
-            )
+            entries = await unit.client.log_query("threat", THREAT_QUERY, nlogs=nlogs, timeout=60)
         except PanOSAuthError as err:
             raise ConfigEntryAuthFailed(str(err)) from err
         except PanOSApiError as err:
-            if err.code == "403":
+            # 403: "not authorized for user role"; 16: "Unauthorized request".
+            if err.code in ("403", "16"):
                 # Not an outage: report it once (warning + repair) rather
                 # than as a failed update on every start.
                 self._permission_denied(unit.config.hostname)
@@ -138,8 +158,7 @@ class PanOSThreatCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             raise UpdateFailed(f"Threat log query failed: {err}") from err
 
         ir.async_delete_issue(self.hass, DOMAIN, self._issue_id)
-        network = self.config_entry.runtime_data.network
-        offset = (network.data or {}).get("utc_offset_minutes") if network else None
+        offset = self._utc_offset(unit)
         threats = [t for e in entries if (t := parse_threat(e, offset))]
         threats.sort(key=lambda t: t["seqno"])
         if not first:
@@ -156,7 +175,12 @@ class PanOSThreatCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         for threat in threats:
             self._recent[threat["seqno"]] = threat
 
-        cutoff = dt_util.utcnow() - timedelta(seconds=KEEP)
+        now = dt_util.utcnow()
+        if len(entries) >= nlogs:
+            # The read hit its limit, so older matching entries were skipped:
+            # the 24 h count is a lower bound until that gap ages out.
+            self._incomplete_until = now + timedelta(seconds=KEEP)
+        cutoff = now - timedelta(seconds=KEEP)
         self._recent = {
             seq: t
             for seq, t in self._recent.items()
@@ -173,6 +197,6 @@ class PanOSThreatCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "count_24h": len(recent),
             "by_severity": by_severity,
             "latest": recent[:LATEST],
-            # The first read is capped, so a very busy day may be undercounted.
-            "capped": first and len(entries) >= FIRST_READ,
+            # A read hit its limit within the last 24 h: the count may be low.
+            "capped": self._incomplete_until is not None and now < self._incomplete_until,
         }

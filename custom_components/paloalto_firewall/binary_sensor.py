@@ -149,6 +149,7 @@ def _track_gp_users(
                     "binary_sensor",
                     f"{prefix}{safe_key(user)}",
                     f"{prefix}{name_key(user)}",
+                    original_name=f"{GP_NAME}{user}",
                 )
             async_add_entities(PanOSGlobalProtectUser(entry, u) for u in new)
 
@@ -226,6 +227,13 @@ def network_binary_sensors(entry: PanOSConfigEntry) -> list[BinarySensorEntity]:
             entities.append(PanOSBgpPeerSensor(entry, lr, peer, device))
     for lr, families in (data.get("default_routes") or {}).items():
         for family in families:
+            # v0.9.0 keyed these by a lossy slug ("wan-a" and "wan_a" collided).
+            migrate_unique_id(
+                network.hass,
+                "binary_sensor",
+                f"{entry.entry_id}_defroute_{safe_key(lr)}_{family}",
+                f"{entry.entry_id}_defroute_{name_key(lr)}_{family}",
+            )
             entities.append(PanOSDefaultRouteSensor(entry, lr, family, lr_device_info(entry, lr)))
     for key, group in data["path_groups"].items():
         entities.append(
@@ -409,7 +417,7 @@ class PanOSDefaultRouteSensor(PanOSNetworkEntity, BinarySensorEntity):
     _attr_icon = "mdi:routes"
 
     def __init__(self, entry: PanOSConfigEntry, lr: str, family: str, device) -> None:
-        super().__init__(entry, f"defroute_{safe_key(lr)}_{family}", device)
+        super().__init__(entry, f"defroute_{name_key(lr)}_{family}", device)
         self._lr = lr
         self._family = family
         self._attr_name = f"{'IPv4' if family == 'ipv4' else 'IPv6'} backup default route"
@@ -424,7 +432,10 @@ class PanOSDefaultRouteSensor(PanOSNetworkEntity, BinarySensorEntity):
     @property
     def is_on(self) -> bool | None:
         state = self._state()
-        return state["on_backup"] if state else None
+        if not state or not state["route"]:
+            # No default route at all: neither normal nor on the backup.
+            return None
+        return state["on_backup"]
 
     @property
     def extra_state_attributes(self) -> dict[str, Any] | None:
@@ -513,14 +524,14 @@ class PanOSCertExpiringSensor(PanOSNetworkEntity, BinarySensorEntity):
         super().__init__(entry, "cert_expiring")
 
     def _status(self) -> dict[str, list[dict[str, Any]]] | None:
-        certs = self.data.get("certificates")
-        if certs is None:
+        store = (self.data.get("certificates") or {}).get("store")
+        if store is None:
             return None
-        return certs_expiring(certs["store"], dt_util.utcnow(), CERT_WARN_DAYS)
+        return certs_expiring(store, dt_util.utcnow(), CERT_WARN_DAYS)
 
     @property
     def available(self) -> bool:
-        return super().available and self.data.get("certificates") is not None
+        return super().available and (self.data.get("certificates") or {}).get("store") is not None
 
     @property
     def is_on(self) -> bool | None:
