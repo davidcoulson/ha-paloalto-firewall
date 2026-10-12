@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import os
 import re
+import tempfile
 import xml.etree.ElementTree as ET
+from datetime import datetime
 from pathlib import Path
 from typing import Any, cast
 from xml.sax.saxutils import escape
@@ -552,20 +555,49 @@ BACKUP_SCHEMA = vol.Schema(
 )
 
 
-def _write_backup(folder: Path, hostname: str, text: str, keep: int, stamp: str) -> dict[str, Any]:
-    """Save one firewall's config unless it matches its newest backup; prune old ones."""
+_STAMP = "%Y%m%dT%H%M%S%fZ"
+_BACKUP_RE = re.compile(r"^(?P<host>.+)_(?P<stamp>\d{8}T\d{12}Z)\.xml$")
+_LEGACY_RE = r"^{host}_\d{{8}}-\d{{6}}\.xml$"
+
+
+def _safe(name: str) -> str:
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", name) or "firewall"
+
+
+def _write_backup(
+    root: Path, serial: str, hostname: str, config: ET.Element, keep: int, now: datetime
+) -> dict[str, Any]:
+    """Save one firewall's config unless it matches its newest backup; prune old ones.
+
+    Each firewall has its own folder (by serial), so retention never touches
+    another firewall's files, whatever the hostnames. Runs in an executor.
+    """
+    text = '<?xml version="1.0"?>\n' + ET.tostring(config, encoding="unicode") + "\n"
+    folder = root / _safe(serial)
     folder.mkdir(parents=True, exist_ok=True)
-    base = re.sub(r"[^A-Za-z0-9._-]+", "_", hostname)
-    existing = sorted(folder.glob(f"{base}_*.xml"))
+    host = _safe(hostname)
+
+    # v0.8.x backups at the top level are left alone: a hostname doesn't say
+    # which firewall (or config entry) they came from, so they're never
+    # moved or pruned here.
+    def stamp_of(path: Path) -> str:
+        m = _BACKUP_RE.match(path.name)
+        return m["stamp"] if m else ""
+
+    existing = sorted((p for p in folder.glob("*.xml") if _BACKUP_RE.match(p.name)), key=stamp_of)
     if existing and existing[-1].read_text(encoding="utf-8") == text:
         target, unchanged = existing[-1], True
     else:
-        target, unchanged = folder / f"{base}_{stamp}.xml", False
-        tmp = target.with_suffix(".tmp")
-        tmp.write_text(text, encoding="utf-8")
-        tmp.replace(target)
-        if target not in existing:
-            existing.append(target)
+        target, unchanged = folder / f"{host}_{now.strftime(_STAMP)}.xml", False
+        fd, tmp = tempfile.mkstemp(dir=folder, prefix=".", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(text)
+            os.replace(tmp, target)
+        except BaseException:
+            Path(tmp).unlink(missing_ok=True)
+            raise
+        existing.append(target)
     removed = []
     for old in existing[:-keep]:
         old.unlink(missing_ok=True)
@@ -577,31 +609,32 @@ async def _async_backup_config(call: ServiceCall) -> ServiceResponse:
     """Save each firewall's running config as XML under the Home Assistant config folder."""
     hass = call.hass
     entry = _get_entry(hass, call.data.get(ATTR_CONFIG_ENTRY_ID))
-    folder = Path(hass.config.path(BACKUP_DIR))
-    stamp = dt_util.now().strftime("%Y%m%d-%H%M%S")
+    root = Path(hass.config.path(BACKUP_DIR))
+    locks: dict[str, asyncio.Lock] = hass.data.setdefault(f"{DOMAIN}_backup_locks", {})
     saved: dict[str, Any] = {}
     errors: dict[str, Any] = {}
     for unit in entry.runtime_data.units:
         name = unit.config.hostname
-        try:
-            result = await unit.client.op(CMD_RUNNING_CONFIG, timeout=120)
-        except PanOSAuthError as err:
-            errors[name] = f"authentication failed: {err}"
-            continue
-        except PanOSError as err:
-            errors[name] = str(err)
-            continue
-        config = result.find("config")
-        if config is None:
-            errors[name] = "the firewall returned no configuration"
-            continue
-        text = '<?xml version="1.0"?>\n' + ET.tostring(config, encoding="unicode") + "\n"
-        saved[name] = await hass.async_add_executor_job(
-            _write_backup, folder, name, text, call.data["keep"], stamp
-        )
+        # One backup at a time per firewall, so overlapping calls can't race.
+        async with locks.setdefault(unit.config.serial, asyncio.Lock()):
+            try:
+                result = await unit.client.op(CMD_RUNNING_CONFIG, timeout=120)
+            except PanOSAuthError as err:
+                errors[name] = f"authentication failed: {err}"
+                continue
+            except PanOSError as err:
+                errors[name] = str(err)
+                continue
+            config = result.find("config")
+            if config is None:
+                errors[name] = "the firewall returned no configuration"
+                continue
+            saved[name] = await hass.async_add_executor_job(
+                _write_backup, root, unit.config.serial, name, config, call.data["keep"], dt_util.utcnow()
+            )
     if not saved:
         raise HomeAssistantError("Config backup failed: " + "; ".join(f"{k}: {v}" for k, v in errors.items()))
-    return {"folder": str(folder), "firewalls": saved, "errors": errors} if call.return_response else None
+    return {"folder": str(root), "firewalls": saved, "errors": errors} if call.return_response else None
 
 
 async def _async_check_updates(call: ServiceCall) -> ServiceResponse:

@@ -6,17 +6,23 @@ from datetime import UTC
 
 from custom_components.paloalto_firewall import const
 from custom_components.paloalto_firewall.api import (
-    PanOSAuthError,
     PanOSConnectionError,
-    parse_response,
 )
 
 OK = '<response status="success"><result>{}</result></response>'
+INVALID_CREDENTIAL = (
+    '<response status="error" code="403"><result><msg>Invalid Credential</msg></result></response>',
+    403,
+)
+ROLE_REFUSED = (
+    '<response status="error" code="403"><result><msg>Type [{}] not authorized for user role.</msg>'
+    "</result></response>"
+)
 
 
-def system_info(host, serial, sw="11.1.4-h7", app="8900-9150", gp="6.3.3-c1046"):
+def system_info(host, serial, sw="11.1.4-h7", app="8900-9150", gp="6.3.3-c1046", clock=None):
     return OK.format(f"""<system><hostname>{host}</hostname><ip-address>10.0.0.{serial[-1]}</ip-address>
-<uptime>12 days, 3:04:05</uptime><family>400</family><model>PA-440</model><serial>{serial}</serial>
+<uptime>12 days, 3:04:05</uptime>{f"<time>{clock}</time>" if clock else ""}<family>400</family><model>PA-440</model><serial>{serial}</serial>
 <sw-version>{sw}</sw-version><global-protect-client-package-version>{gp}</global-protect-client-package-version>
 <app-version>{app}</app-version><av-version>4950-5470</av-version><threat-version>{app}</threat-version>
 <wildfire-version>912345-916000</wildfire-version><url-filtering-version>20261007.20123</url-filtering-version>
@@ -313,7 +319,7 @@ def route_table(afi, defaults):
             prefix: [
                 {
                     "prefix": prefix,
-                    "protocol": "static",
+                    "protocol": r.get("protocol", "static"),
                     "selected": True,
                     "distance": r["distance"],
                     "metric": 10,
@@ -531,6 +537,18 @@ class FakePair:
         }
         self.threats: dict[str, list[dict]] = {}  # host -> threat log entries
         self.log_jobs: list[int] = []
+        self.finished_log_jobs: list[str] = []
+        self.log_job_never_finishes = False
+        # API keys the firewall accepts, and the one keygen hands out.
+        self.issue_key = "KEY"
+        # Firewall local clock for `show system info` <time> (None: omitted).
+        self.clock = None
+        self.valid_keys = {"KEY"}
+        self.rejected_keys: list[str | None] = []
+        # Hold requests for hold_cmd until the event is set (cancellation tests).
+        self.hold = None
+        self.hold_cmd = None
+        self.held = 0
 
     def peer(self, host):
         return next(u for h, u in self.units.items() if h != host)
@@ -541,50 +559,47 @@ class FakePair:
         if not unit["up"]:
             raise PanOSConnectionError(f"{host} down")
         if self.bad_password:
-            raise PanOSAuthError("Invalid credentials")
+            return INVALID_CREDENTIAL
         peer = self.peer(host)
         if (kind := self.fail.get(cmd)) == "403":
-            return parse_response(
-                '<response status="error" code="403"><result><msg>'
-                "Type [op] not authorized for user role.</msg></result></response>"
-            )
+            return ROLE_REFUSED.format("op"), 403
         if kind:
-            return parse_response(
-                '<response status="error"><msg><line>Command failed</line></msg></response>'
-            )
+            return ('<response status="error"><msg><line>Command failed</line></msg></response>', 200)
         if cmd.startswith("<show><interface>") and cmd != const.CMD_INTERFACE_ALL:
             self.counter_calls += 1
             name = cmd[len("<show><interface>") : -len("</interface></show>")]
             n = self.counter_calls
-            return parse_response(interface_detail(name, n * 7_500_000, n * 750_000))
+            return (interface_detail(name, n * 7_500_000, n * 750_000), 200)
         if cmd.startswith("<show><advanced-routing><bgp><peer><status><logical-router>"):
             lr = cmd.split("<logical-router>")[1].split("<")[0]
-            return parse_response(bgp_peers(lr, self.dns_bgp_up))
+            return (bgp_peers(lr, self.dns_bgp_up), 200)
         if cmd.startswith("<show><session><all><filter>"):
-            return parse_response(SESSION_COUNT if "<count>yes</count>" in cmd else SESSIONS)
+            return (SESSION_COUNT if "<count>yes</count>" in cmd else SESSIONS, 200)
         if cmd == const.CMD_RUNNING_CONFIG:
-            return parse_response(
+            return (
                 OK.format(
                     '<config version="11.1.0"><devices><entry name="localhost.localdomain">'
                     f"<deviceconfig><system><hostname>{unit['hostname']}</hostname></system>"
                     "</deviceconfig></entry></devices></config>"
-                )
+                ),
+                200,
             )
         if cmd.startswith("<show><session><id>"):
-            return parse_response(SESSION_DETAIL)
+            return (SESSION_DETAIL, 200)
         if cmd.startswith("<test><nat-policy-match>"):
-            return parse_response(NAT_MATCH)
+            return (NAT_MATCH, 200)
         if cmd.startswith("<test><security-policy-match>"):
             if "<from>bogus</from>" in cmd:
-                return parse_response(
-                    '<response status="error"><msg><line>from bogus is invalid</line></msg></response>'
+                return (
+                    '<response status="error"><msg><line>from bogus is invalid</line></msg></response>',
+                    200,
                 )
             if self.deny_vsys and self.last_vsys == self.deny_vsys:
-                return parse_response(POLICY_DENY)
-            return parse_response(POLICY_NO_MATCH if "9.9.9.9" in cmd else POLICY_MATCH)
+                return (POLICY_DENY, 200)
+            return (POLICY_NO_MATCH if "9.9.9.9" in cmd else POLICY_MATCH, 200)
         table = {
             const.CMD_SYSTEM_INFO: system_info(
-                unit["hostname"], unit["serial"], gp=unit.get("gp", "6.3.3-c1046")
+                unit["hostname"], unit["serial"], gp=unit.get("gp", "6.3.3-c1046"), clock=self.clock
             ),
             const.CMD_HA_STATE: ha_state(
                 unit["state"],
@@ -620,10 +635,8 @@ class FakePair:
             const.CMD_DHCP_LEASES: DHCP,
         }
         if cmd not in table:
-            return parse_response(
-                '<response status="error"><msg><line>Invalid syntax.</line></msg></response>'
-            )
-        return parse_response(table[cmd])
+            return ('<response status="error"><msg><line>Invalid syntax.</line></msg></response>', 200)
+        return (table[cmd], 200)
 
     def log(self, host, data):
         """Asynchronous log query: enqueue returns a job, get returns the entries."""
@@ -631,43 +644,50 @@ class FakePair:
         if not self.units[host]["up"]:
             raise PanOSConnectionError(f"{host} down")
         if self.fail.get("log:threat") == "403":
-            # What the real client raises for HTTP 403 "Type [log] not authorized for user role."
-            from custom_components.paloalto_firewall.api import PanOSApiError
-
-            raise PanOSApiError(
-                "Not permitted for this admin role: Type [log] not authorized for user role.", "403"
+            return ROLE_REFUSED.format("log"), 403
+        if self.fail.get("log:threat") == "16":
+            return (
+                '<response status="error" code="16"><msg><line>Unauthorized request</line></msg></response>',
+                200,
             )
+        if data.get("action") == "finish":
+            self.finished_log_jobs.append(data["job-id"])
+            return OK.format(""), 200
+        if self.log_job_never_finishes and data.get("action") == "get":
+            return OK.format(f"<job><id>{data['job-id']}</id><status>ACT</status></job>"), 200
         if data.get("action") != "get":
             self.log_jobs.append(int(data.get("nlogs", 20)))
-            return parse_response(
-                OK.format(f"<msg><line>query job enqueued</line></msg><job>{len(self.log_jobs)}</job>")
+            return (
+                OK.format(f"<msg><line>query job enqueued</line></msg><job>{len(self.log_jobs)}</job>"),
+                200,
             )
         nlogs = self.log_jobs[int(data["job-id"]) - 1]
         newest = sorted(self.threats.get(host, []), key=lambda t: -t["seqno"])[:nlogs]
         entries = "".join(
             "<entry>" + "".join(f"<{k}>{v}</{k}>" for k, v in t.items()) + "</entry>" for t in newest
         )
-        return parse_response(
+        return (
             OK.format(
                 f"<job><id>{data['job-id']}</id><status>FIN</status></job>"
                 f'<log><logs count="{len(newest)}" progress="100">{entries}</logs></log>'
-            )
+            ),
+            200,
         )
 
     def patch(self, monkeypatch):
-        """Stand in for the HTTP layer, so the client's key handling is real."""
+        """Stand in for the network below PanOSClient._post, so the client's
+        status handling, 403 classification, key handling and cancellation
+        are all the real code."""
         from custom_components.paloalto_firewall.api import PanOSClient
 
         fake = self
         self.keygens = 0
 
-        async def _post(self, data, with_key=True, timeout=30):
+        async def _send(self, data, headers, timeout):
             if fake.tls_error:
                 import ssl
 
                 import aiohttp
-
-                from custom_components.paloalto_firewall.api import PanOSConnectionError
 
                 raise PanOSConnectionError("certificate verify failed") from (
                     aiohttp.ClientConnectorCertificateError(
@@ -676,8 +696,17 @@ class FakePair:
                 )
             if data["type"] == "keygen":
                 fake.keygens += 1
-                fake.respond(self.host, const.CMD_SYSTEM_INFO)  # raises if down/bad auth
-                return parse_response(OK.format("<key>KEY</key>"))
+                if not fake.units[self.host]["up"]:
+                    raise PanOSConnectionError(f"{self.host} down")
+                if fake.bad_password:
+                    return INVALID_CREDENTIAL
+                return OK.format(f"<key>{fake.issue_key}</key>"), 200
+            if headers.get("X-PAN-KEY") not in fake.valid_keys:
+                fake.rejected_keys.append(headers.get("X-PAN-KEY"))
+                return INVALID_CREDENTIAL
+            if fake.hold is not None and data.get("cmd") == fake.hold_cmd:
+                fake.held += 1
+                await fake.hold.wait()
             if data["type"] == "log":
                 return fake.log(self.host, data)
             cmd = data["cmd"]
@@ -687,4 +716,4 @@ class FakePair:
                 fake.vsys_calls.append((cmd, vsys))
             return fake.respond(self.host, cmd)
 
-        monkeypatch.setattr(PanOSClient, "_post", _post)
+        monkeypatch.setattr(PanOSClient, "_send", _send)

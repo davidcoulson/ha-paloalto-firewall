@@ -48,7 +48,9 @@ class PanOSRepairs:
     @callback
     def async_evaluate(self) -> None:
         wanted: dict[str, dict[str, Any]] = {}
-        known: set[str] = set()  # issue groups whose source data is current
+        # Issue-id prefixes whose source data was read successfully this time:
+        # only those issues may be withdrawn. A failed read never resolves one.
+        known: set[str] = set()
         self._certificates(wanted, known)
         self._licences(wanted, known)
         self._ha_sync(wanted, known)
@@ -58,8 +60,8 @@ class PanOSRepairs:
         for (domain, issue_id), _issue in list(registry.issues.items()):
             if domain != DOMAIN or not issue_id.startswith(self.prefix) or issue_id in wanted:
                 continue
-            group = issue_id[len(self.prefix) :].split("_", 1)[0]
-            if group in known:
+            suffix = issue_id[len(self.prefix) :]
+            if any(suffix.startswith(group) for group in known):
                 ir.async_delete_issue(self.hass, DOMAIN, issue_id)
         for issue_id, issue in wanted.items():
             ir.async_create_issue(
@@ -78,11 +80,14 @@ class PanOSRepairs:
         certs = (network.data or {}).get("certificates") if network else None
         if not certs or certs.get("store") is None:
             return
-        known.add("cert")
+        known.add("cert_")
         split = certs_expiring(certs["store"], dt_util.utcnow(), CERT_WARN_DAYS)
         for kind, severity in (("expiring", ir.IssueSeverity.WARNING), ("expired", ir.IssueSeverity.ERROR)):
             for cert in split[kind]:
-                wanted[f"{self.prefix}cert_{name_key(cert['name'])}"] = {
+                # Several certificates can share a CN (renewals, scopes): key by serial too.
+                wanted[
+                    f"{self.prefix}cert_{name_key(cert['name'], cert.get('serial'), cert.get('issuer'))}"
+                ] = {
                     "severity": severity,
                     "key": f"certificate_{kind}",
                     "placeholders": {
@@ -127,7 +132,7 @@ class PanOSRepairs:
                     },
                 }
         if all_current:
-            known.add("licence")
+            known.add("licence_")
 
     def _ha_sync(self, wanted: dict[str, dict[str, Any]], known: set[str]) -> None:
         now = dt_util.utcnow()
@@ -137,8 +142,12 @@ class PanOSRepairs:
             if data is None:
                 all_current = False
                 continue
-            ha = data.get("ha") or {}
+            ha = data.get("ha")
             serial = unit.config.serial
+            if ha is None:
+                # HA state couldn't be read this poll: unknown, not "in sync".
+                all_current = False
+                continue
             out_of_sync = (
                 ha.get("enabled")
                 and ha.get("running_sync_enabled")
@@ -160,27 +169,31 @@ class PanOSRepairs:
                     },
                 }
         if all_current:
-            known.add("hasync")
+            known.add("hasync_")
 
     def _updates(self, wanted: dict[str, dict[str, Any]], known: set[str]) -> None:
         kinds = (
             ("panos", "software", "sw_version", latest_panos, panos_version_key),
             ("gpclient", "gp_client", "gp_client_version", latest_gp_client, gp_version_key),
         )
-        all_current = True
+        read_ok = {k[0]: True for k in kinds}
         # kind -> newest version -> [(hostname, installed, HA state)]
         pending: dict[str, dict[str, list[tuple[str, str, str | None]]]] = {k[0]: {} for k in kinds}
         for unit in self.entry.runtime_data.units:
             checks = unit.updates.data
             system = (unit.coordinator.data or {}).get("system")
             if checks is None or system is None:
-                all_current = False
+                read_ok = dict.fromkeys(read_ok, False)
                 continue
             ha = (unit.coordinator.data or {}).get("ha") or {}
             ha_state = ha.get("local_state") if ha.get("enabled") else None
             for kind, section, installed_key, latest_fn, key_fn in kinds:
                 installed = system.get(installed_key)
-                versions = (checks.get(section) or {}).get("versions")
+                if checks.get(section) is None:
+                    # This unit's check failed: an existing repair stays.
+                    read_ok[kind] = False
+                    continue
+                versions = checks[section].get("versions")
                 if not installed or installed == "0.0.0" or versions is None:
                     continue
                 train = latest_fn(versions, installed)["train"]
@@ -191,10 +204,11 @@ class PanOSRepairs:
                     pending[kind].setdefault(train["version"], []).append(
                         (unit.config.hostname, installed, ha_state)
                     )
+        paired = len(self.entry.runtime_data.units) > 1
         for kind, by_version in pending.items():
             for version, units in by_version.items():
                 # Passive firewall first: that's the order to upgrade an HA pair.
-                units.sort(key=lambda u: u[2] in ("active", "active-primary"))
+                units.sort(key=lambda u: _is_active(u[2]))
                 wanted[f"{self.prefix}update_{kind}_{name_key(version)}"] = {
                     "severity": ir.IssueSeverity.WARNING,
                     "key": f"update_{kind}",
@@ -202,14 +216,19 @@ class PanOSRepairs:
                         "version": version,
                         "names": " & ".join(u[0] for u in units),
                         "firewalls": ", ".join(f"{u[0]} ({u[1]})" for u in units),
-                        "commands": _commands(kind, version, units),
+                        "commands": _commands(kind, version, units, paired),
                     },
                 }
-        if all_current:
-            known.add("update")
+        for kind, ok in read_ok.items():
+            if ok:
+                known.add(f"update_{kind}_")
 
 
-def _commands(kind: str, version: str, units: list[tuple[str, str, str | None]]) -> str:
+def _is_active(state: str | None) -> bool:
+    return bool(state) and str(state).startswith("active")
+
+
+def _commands(kind: str, version: str, units: list[tuple[str, str, str | None]], paired: bool) -> str:
     """CLI to apply the update, one block per firewall in upgrade order."""
     blocks = []
     for host, _installed, state in units:
@@ -221,9 +240,11 @@ def _commands(kind: str, version: str, units: list[tuple[str, str, str | None]])
                 f"request global-protect-client software activate version {version}",
             ]
         else:
-            active = state in ("active", "active-primary")
+            # On a pair, the active unit hands over before it restarts, even if
+            # its peer is already on this version.
+            active = _is_active(state)
             lines = []
-            if active and len(units) > 1:
+            if active and paired:
                 lines.append("request high-availability state suspend   # fail over to the upgraded peer")
             lines += [
                 f"request system software download version {version}",
@@ -232,7 +253,7 @@ def _commands(kind: str, version: str, units: list[tuple[str, str, str | None]])
                 "show jobs all   # wait for the install to show FIN / OK",
                 "request restart system",
             ]
-            if active and len(units) > 1:
+            if active and paired:
                 lines.append("request high-availability state functional   # once it's back up")
         blocks.append("\n".join([label, *lines]))
     return "```\n" + "\n\n".join(blocks) + "\n```"

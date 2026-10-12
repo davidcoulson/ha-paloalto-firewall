@@ -1,3 +1,4 @@
+import asyncio
 from datetime import timedelta
 
 import pytest
@@ -12,6 +13,7 @@ from pytest_homeassistant_custom_component.common import (
     async_fire_time_changed,
 )
 
+from custom_components.paloalto_firewall import const
 from custom_components.paloalto_firewall.const import (
     CONF_PRIMARY_HOST,
     CONF_SECONDARY_HOST,
@@ -1009,24 +1011,36 @@ async def test_unique_ids_migrate_and_do_not_collide(hass: HomeAssistant, fake) 
 
 async def test_backup_config(hass: HomeAssistant, fake, freezer, tmp_path) -> None:
     hass.config.config_dir = str(tmp_path)
+    root = tmp_path / "paloalto_firewall_backups"
+    # A v0.8.x backup at the top level, and another firewall whose hostname
+    # starts with "fw1_" (its files must never be pruned for fw1).
+    root.mkdir()
+    (root / "fw1_20261001-031500.xml").write_text("<config/>")
+    other = root / "9999" / "fw1_dc_20261001T031500000000Z.xml"
+    other.parent.mkdir()
+    other.write_text("<config/>")
     await _setup(hass, fake)
+
     first = await hass.services.async_call(DOMAIN, "backup_config", {}, blocking=True, return_response=True)
-    folder = tmp_path / "paloalto_firewall_backups"
-    assert first["folder"] == str(folder)
+    assert first["folder"] == str(root)
     assert set(first["firewalls"]) == {"fw1", "fw2"} and first["errors"] == {}
-    files = sorted(p.name for p in folder.iterdir())
-    assert len(files) == 2 and files[0].startswith("fw1_") and files[0].endswith(".xml")
-    text = (folder / files[0]).read_text()
+    fw1_dir = root / "0123456789001"
+    # The v0.8 file is left alone: its hostname doesn't prove which firewall it's from.
+    assert (root / "fw1_20261001-031500.xml").exists()
+    fw1_files = sorted(p.name for p in fw1_dir.iterdir())
+    assert len(fw1_files) == 1 and fw1_files[0].startswith("fw1_") and fw1_files[0].endswith("Z.xml")
+    text = (fw1_dir / fw1_files[0]).read_text()
     assert text.startswith('<?xml version="1.0"?>\n<config version="11.1.0">')
     assert "<hostname>fw1</hostname>" in text
+    assert next(p.name for p in (root / "0123456789002").iterdir()).startswith("fw2_")
 
     # Unchanged config: nothing new is written.
     freezer.tick(timedelta(hours=1))
     again = await hass.services.async_call(DOMAIN, "backup_config", {}, blocking=True, return_response=True)
     assert again["firewalls"]["fw1"]["unchanged"] is True
-    assert len(list(folder.iterdir())) == 2
+    assert len(list(fw1_dir.iterdir())) == 1
 
-    # Changed config is saved, and keep prunes the older copy.
+    # Changed config is saved, and keep prunes only this firewall's older copies.
     fake.units["fw1.lan"]["hostname"] = "fw1-renamed"
     fake.units["fw2.lan"]["up"] = False
     freezer.tick(timedelta(hours=1))
@@ -1035,8 +1049,20 @@ async def test_backup_config(hass: HomeAssistant, fake, freezer, tmp_path) -> No
     )
     assert "fw2" in third["errors"]
     assert third["firewalls"]["fw1"]["unchanged"] is False
-    assert third["firewalls"]["fw1"]["pruned"] == [files[0]]
-    assert "fw1-renamed" in (folder / third["firewalls"]["fw1"]["file"].split("/")[-1]).read_text()
+    assert sorted(third["firewalls"]["fw1"]["pruned"]) == fw1_files
+    assert [p.name for p in fw1_dir.iterdir()] == [third["firewalls"]["fw1"]["file"].split("/")[-1]]
+    assert other.exists() and (root / "fw1_20261001-031500.xml").exists()
+    assert not list(fw1_dir.glob(".*.tmp"))
+
+    # Overlapping calls don't trip over each other.
+    fake.units["fw2.lan"]["up"] = True
+    results = await asyncio.gather(
+        *(
+            hass.services.async_call(DOMAIN, "backup_config", {}, blocking=True, return_response=True)
+            for _ in range(3)
+        )
+    )
+    assert all(r["errors"] == {} for r in results)
 
 
 async def test_repairs(hass: HomeAssistant, fake, freezer) -> None:
@@ -1101,8 +1127,15 @@ async def test_repairs(hass: HomeAssistant, fake, freezer) -> None:
     await _tick(hass, freezer, 61)
     assert not any(k.startswith("ha_config_unsynced") for k in issues())
 
-    # Unloading the entry withdraws its issues.
-    assert await hass.config_entries.async_unload(entry.entry_id)
+    # An ignored repair stays ignored through a reload; removing the entry
+    # removes its repairs.
+    cert = next(i for k, i in issues().items() if k.startswith("certificate_expired"))
+    ir.async_ignore_issue(hass, DOMAIN, cert.issue_id, True)
+    assert await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert reg.async_get_issue(DOMAIN, cert.issue_id).dismissed_version is not None
+    assert await hass.config_entries.async_remove(entry.entry_id)
+    await hass.async_block_till_done()
     assert issues() == {}
 
 
@@ -1174,10 +1207,9 @@ async def test_api_keys_are_reused_across_restarts(hass: HomeAssistant, fake, fr
     entry = await _setup(hass, fake)
     assert fake.keygens == 2
     await _tick(hass, freezer, 5)  # the key store saves after a short delay
-    assert hass_storage[f"{DOMAIN}.{entry.entry_id}.keys"]["data"] == {
-        "0123456789001": "KEY",
-        "0123456789002": "KEY",
-    }
+    stored = hass_storage[f"{DOMAIN}.{entry.entry_id}.keys"]["data"]
+    assert stored["keys"] == {"0123456789001": "KEY", "0123456789002": "KEY"}
+    assert "p" not in stored["credential"]  # a hash, not the password
     assert await hass.config_entries.async_reload(entry.entry_id)
     await hass.async_block_till_done(wait_background_tasks=True)
     assert fake.keygens == 2  # stored keys reused, no new keygen
@@ -1261,3 +1293,257 @@ async def test_backup_default_route(hass: HomeAssistant, fake, freezer) -> None:
     assert events[-1].data["change"] == "lost"
     assert events[-1].data["logical_router"] == "wan-b-vr"
     assert hass.states.get("binary_sensor.wan_b_vr_ipv4_backup_default_route").attributes["present"] is False
+
+
+async def test_expired_stored_key_is_regenerated(hass: HomeAssistant, fake, freezer, hass_storage) -> None:
+    entry = await _setup(hass, fake)
+    await _tick(hass, freezer, 5)
+    # The firewall rotates its keys while Home Assistant is down.
+    fake.valid_keys = {"KEY2"}
+    fake.issue_key = "KEY2"
+    assert await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert "KEY" in fake.rejected_keys  # stored key tried first...
+    assert fake.keygens == 4  # ...then one new key per unit
+    assert hass.states.get("sensor.fw1_pan_os_version").state == "11.1.4-h7"
+    await _tick(hass, freezer, 5)
+    assert hass_storage[f"{DOMAIN}.{entry.entry_id}.keys"]["data"]["keys"]["0123456789001"] == "KEY2"
+
+
+async def test_stored_keys_dropped_when_credentials_change(
+    hass: HomeAssistant, fake, freezer, hass_storage
+) -> None:
+    entry = await _setup(hass, fake)
+    await _tick(hass, freezer, 5)
+    hass.config_entries.async_update_entry(entry, data={**entry.data, CONF_USERNAME: "other"})
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert fake.keygens >= 4  # the old account's keys weren't reused
+
+
+async def test_role_refusal_is_not_a_bad_key(hass: HomeAssistant, fake) -> None:
+    """HTTP 403 "not authorized for user role" is a permission limit: no keygen, no reauth."""
+    fake.fail[const.CMD_IPSEC_SA] = "403"
+    entry = await _setup(hass, fake)
+    assert fake.keygens == 2
+    assert not any(entry.async_get_active_flows(hass, {config_entries.SOURCE_REAUTH}))
+    assert fake.calls.count(("fw1.lan", const.CMD_IPSEC_SA)) == 1  # refused once, not retried with a new key
+
+
+async def test_threat_unauthorized_code_16(hass: HomeAssistant, fake) -> None:
+    from homeassistant.helpers import issue_registry as ir
+
+    fake.fail["log:threat"] = "16"
+    entry = await _setup(hass, fake)
+    assert ir.async_get(hass).async_get_issue(DOMAIN, f"{entry.entry_id}_permission_threat_log") is not None
+
+
+async def test_stop_cancels_requests_in_flight(hass: HomeAssistant, fake) -> None:
+    from homeassistant.const import EVENT_HOMEASSISTANT_STOP
+
+    from custom_components.paloalto_firewall.api import PanOSConnectionError
+
+    entry = await _setup(hass, fake)
+    client = entry.runtime_data.units[0].client
+    fake.hold = asyncio.Event()
+    fake.hold_cmd = const.CMD_RUNNING_CONFIG
+    task = hass.async_create_task(client.op(const.CMD_RUNNING_CONFIG))
+    for _ in range(20):
+        await asyncio.sleep(0)
+        if fake.held:
+            break
+    assert fake.held == 1
+    hass.bus.async_fire(EVENT_HOMEASSISTANT_STOP)
+    await hass.async_block_till_done()
+    assert task.cancelled()
+    with pytest.raises(PanOSConnectionError, match="shutting down"):
+        await client.op(const.CMD_SYSTEM_INFO)
+    fake.hold.set()
+
+
+async def test_log_query_is_bounded_and_cleaned_up(hass: HomeAssistant, fake, monkeypatch) -> None:
+    from custom_components.paloalto_firewall import api
+
+    monkeypatch.setattr(api, "LOG_POLL_SECONDS", 0.01)
+    entry = await _setup(hass, fake)
+    fake.log_job_never_finishes = True
+    client = entry.runtime_data.units[0].client
+    with pytest.raises(api.PanOSConnectionError, match="still running"):
+        await client.log_query("threat", "(severity geq high)", nlogs=5, timeout=0.2)
+    assert fake.finished_log_jobs  # the job was stopped on the firewall
+
+
+async def test_default_route_learned_distances(hass: HomeAssistant, fake, freezer) -> None:
+    from homeassistant.helpers import device_registry as dr
+    from homeassistant.helpers import entity_registry as er
+
+    # A pre-0.9.1 entity keyed by the lossy slug keeps its entity_id, but only
+    # an entity on that router's own device is moved.
+    reg = er.async_get(hass)
+    host = MockConfigEntry(domain="other_integration")
+    host.add_to_hass(hass)
+    devices = dr.async_get(hass)
+    wan_b = devices.async_get_or_create(
+        config_entry_id=host.entry_id, identifiers={(DOMAIN, "e1_lr_wan-b-vr")}
+    )
+    old = reg.async_get_or_create(
+        "binary_sensor",
+        DOMAIN,
+        "e1_defroute_wan_b_vr_ipv4",
+        suggested_object_id="my_wan_b_route",
+        device_id=wan_b.id,
+    )
+    stray = reg.async_get_or_create(
+        "binary_sensor",
+        DOMAIN,
+        "e1_defroute_wan_a_vr_ipv6",
+        suggested_object_id="stray",
+        device_id=wan_b.id,  # on the wrong router's device
+    )
+    # A BGP-learned default at distance 20 is the router's normal route.
+    fake.default_routes["wan-b-vr"]["ipv4"].update(distance=20)
+    fake.default_routes["wan-b-vr"]["ipv4"]["protocol"] = "bgp"
+    await _setup(hass, fake, entry_id="e1")
+    migrated = reg.async_get(old.entity_id)
+    assert migrated is not None and migrated.unique_id != "e1_defroute_wan_b_vr_ipv4"
+    assert hass.states.get(old.entity_id).state == "off"
+    assert reg.async_get(stray.entity_id).unique_id == "e1_defroute_wan_a_vr_ipv6"  # not taken
+
+    # No default route at all: unknown, not "normal".
+    del fake.default_routes["wan-a-vr"]["ipv4"]
+    await _tick(hass, freezer, 61)
+    state = hass.states.get("binary_sensor.wan_a_vr_ipv4_backup_default_route")
+    assert state.state == "unknown" and state.attributes["present"] is False
+
+
+async def test_failed_reads_do_not_clear_repairs(hass: HomeAssistant, fake, freezer) -> None:
+    from homeassistant.helpers import issue_registry as ir
+
+    entry = await _setup(hass, fake)
+    reg = ir.async_get(hass)
+
+    def ids() -> set[str]:
+        return {i for (d, i) in reg.issues if d == DOMAIN and reg.issues[(d, i)].active}
+
+    before = ids()
+    assert any("_cert_" in i for i in before) and any("_update_gpclient_" in i for i in before)
+    # The certificate store, the update checks and HA state all fail to read.
+    fake.fail[const.CMD_CERTS_STORE] = "error"
+    fake.fail[const.CMD_GP_CLIENT_CHECK] = "error"
+    fake.fail[const.CMD_HA_STATE] = "error"
+    entry.runtime_data.network.request_slow_refresh()
+    for unit in entry.runtime_data.units:
+        await unit.updates.async_refresh()
+    await _tick(hass, freezer, 61)
+    assert before <= ids()
+
+
+async def test_threat_times_use_the_firewalls_clock(hass: HomeAssistant, fake, freezer) -> None:
+    await hass.config.async_set_time_zone("America/New_York")
+    # The firewall runs on UTC, a different zone from Home Assistant.
+    fake.clock = dt_util.utcnow().strftime("%a %b %d %H:%M:%S %Y")
+    stamp = (dt_util.utcnow() - timedelta(minutes=5)).strftime("%Y/%m/%d %H:%M:%S")
+    fake.threats["fw1.lan"] = [{**_threat(1), "time_generated": stamp}]
+    await _setup(hass, fake)
+    latest = hass.states.get("sensor.edge_ha_pair_threats_24h").attributes["latest"][0]
+    when = dt_util.parse_datetime(latest["time"])
+    assert abs((dt_util.utcnow() - when).total_seconds() - 300) < 90
+
+
+async def test_threat_capped_flag_persists(hass: HomeAssistant, fake, freezer, monkeypatch) -> None:
+    from custom_components.paloalto_firewall import threats
+
+    monkeypatch.setattr(threats, "FIRST_READ", 3)
+    monkeypatch.setattr(threats, "POLL_READ", 2)
+    fake.threats["fw1.lan"] = [_threat(i) for i in range(1, 6)]
+    await _setup(hass, fake)
+    assert hass.states.get("sensor.edge_ha_pair_threats_24h").attributes["count_capped"] is True
+    await _tick(hass, freezer, 61)
+    assert hass.states.get("sensor.edge_ha_pair_threats_24h").attributes["count_capped"] is True
+
+
+async def test_threat_cap_ignores_old_entries(hass: HomeAssistant, fake, monkeypatch) -> None:
+    """A full read of entries all older than 24 h doesn't mean today's count is short."""
+    from custom_components.paloalto_firewall import threats
+
+    monkeypatch.setattr(threats, "FIRST_READ", 3)
+    fake.threats["fw1.lan"] = [_threat(i, minutes_ago=60 * 30 + i) for i in range(1, 6)]
+    await _setup(hass, fake)
+    state = hass.states.get("sensor.edge_ha_pair_threats_24h")
+    assert state.state == "0"
+    assert state.attributes["count_capped"] is False
+
+
+async def test_gp_migration_checks_the_original_name(hass: HomeAssistant, fake) -> None:
+    from homeassistant.helpers import entity_registry as er
+
+    reg = er.async_get(hass)
+    # Old entity for user "a_b"; "a.b" (same old slug) must not take it.
+    old = reg.async_get_or_create(
+        "binary_sensor",
+        DOMAIN,
+        "e2_gp_user_a_b",
+        suggested_object_id="my_a_b",
+        original_name="GlobalProtect a_b",
+    )
+    fake.gp_online = {"a.b", "a_b"}
+    await _setup(hass, fake, entry_id="e2")
+    assert hass.states.get(old.entity_id).attributes["friendly_name"].endswith("a_b")
+
+
+async def test_threats_wait_through_a_slow_start(hass: HomeAssistant, fake, freezer) -> None:
+    from homeassistant.const import EVENT_HOMEASSISTANT_STARTED
+    from homeassistant.core import CoreState
+
+    hass.set_state(CoreState.starting)
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        unique_id="0123456789001_0123456789002",
+        data={
+            CONF_NAME: "Edge",
+            CONF_USERNAME: "u",
+            CONF_PASSWORD: "p",
+            CONF_VERIFY_SSL: False,
+            CONF_UNITS: [
+                {"host": h, "serial": u["serial"], "hostname": u["hostname"], "model": "PA-440"}
+                for h, u in fake.units.items()
+            ],
+        },
+    )
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    for _ in range(4):  # several scan intervals while Home Assistant is still starting
+        await _tick(hass, freezer, 61)
+    assert ("fw1.lan", "log:threat") not in fake.calls
+    hass.set_state(CoreState.running)
+    hass.bus.async_fire(EVENT_HOMEASSISTANT_STARTED)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert ("fw1.lan", "log:threat") in fake.calls
+
+
+async def test_threat_offset_uses_when_the_clock_was_read(hass: HomeAssistant, fake, freezer) -> None:
+    """A status sample read 10 minutes ago still gives the right offset."""
+    from custom_components.paloalto_firewall.parsers import firewall_utc_offset
+
+    fake.clock = dt_util.utcnow().strftime("%a %b %d %H:%M:%S %Y")  # firewall on UTC
+    entry = await _setup(hass, fake)
+    status = entry.runtime_data.units[0].coordinator.data
+    freezer.tick(timedelta(minutes=10))
+    assert firewall_utc_offset(status["system"]["time"], status["fetched_at"]) == 0
+    assert entry.runtime_data.threats._utc_offset(entry.runtime_data.units[0]) == 0
+
+
+async def test_repeated_full_reads_do_not_extend_the_cap(
+    hass: HomeAssistant, fake, freezer, monkeypatch
+) -> None:
+    from custom_components.paloalto_firewall import threats
+
+    monkeypatch.setattr(threats, "FIRST_READ", 10)
+    monkeypatch.setattr(threats, "POLL_READ", 2)
+    fake.threats["fw1.lan"] = [_threat(i) for i in range(1, 4)]
+    await _setup(hass, fake)
+    assert hass.states.get("sensor.edge_ha_pair_threats_24h").attributes["count_capped"] is False
+    for _ in range(3):  # each later read returns 2 already-known entries: no gap
+        await _tick(hass, freezer, 61)
+    assert hass.states.get("sensor.edge_ha_pair_threats_24h").attributes["count_capped"] is False

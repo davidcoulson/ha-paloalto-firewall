@@ -108,7 +108,7 @@ These are read from the **active** firewall and live under the HA pair device (o
 | Path monitor *interface* via *next hop* | one connectivity sensor per monitored next hop; monitored routes and probe results as attributes |
 | FIB routes | IPv4/IPv6 route counts (diagnostic) |
 | BGP peers established | count of Established peers; `down` lists the rest, `peers` every peer's state (BGP-enabled logical routers only) |
-| IPv4 / IPv6 backup default route | on while the router's selected default route (0.0.0.0/0, ::/0) is a floating backup, i.e. its admin distance is above the usual 10; interface, next hop, protocol, distance, `changes_24h` and the last change as attributes (routers with a default route only) |
+| IPv4 / IPv6 backup default route | on while the router's selected default route (0.0.0.0/0, ::/0) is a floating backup: a higher admin distance than the router's usual default route (the lowest seen; for a static route, PAN-OS's default of 10 until a lower one is seen; a BGP/OSPF-learned route is its own baseline). Unknown when there's no default route at all. Interface, next hop, protocol, distance, `usual_distance`, `changes_24h` and the last change as attributes (routers with a default route only) |
 | BGP *peer* | one connectivity sensor per BGP peer, on while Established; peer/local IP, AS numbers, peer group, uptime, accepted/sent prefixes per address family and last reset reason as attributes |
 
 When an egress changes, `paloalto_firewall_egress_change` fires with `logical_router`, `family`, `previous_interface`/`previous_zone` and `interface`/`zone`/`nexthop`. For example, to be told when internal traffic fails over between WANs:
@@ -198,11 +198,11 @@ actions:
         to {{ trigger.event.data.destination }} ({{ trigger.event.data.action }})
 ```
 
-This needs **Log** enabled in the admin role's XML API settings. Without it the firewall refuses the first query, a repair explains what to enable, the sensor stays unavailable, and the threat log isn't queried again until the integration is reloaded (or Home Assistant restarts). The log is read every poll (newest 100 entries), so a burst of more than 100 high/critical threats within one poll interval only raises events for the newest 100.
+This needs **Log** enabled in the admin role's XML API settings. Without it the firewall refuses the first query, a repair explains what to enable, the sensor stays unavailable, and the threat log isn't queried again until the integration is reloaded (or Home Assistant restarts). The log is read every poll (newest 100 entries; 500 after a start or failover), so a burst of more than 100 high/critical threats within one poll interval only raises events for the newest 100. When a read hits that limit, the sensor's `count_capped` attribute stays true for 24 hours, since the count may be low until the gap ages out.
 
 ### Repairs
 
-Problems that need a person show up under **Settings → Repairs** and clear themselves once fixed:
+Problems that need a person show up under **Settings → Repairs** and clear themselves once a successful read shows they're fixed (a failed read never clears one). Ignoring a repair sticks across reloads and restarts; they're removed with the integration:
 
 - a certificate that expires within 30 days (warning) or has expired (error)
 - a licence that expires within 30 days or has expired (the warranty isn't counted)
@@ -220,7 +220,7 @@ Read with `show sslmgr-store config-ca-certificate` and `config-certificate-info
 
 ## Back up the configuration
 
-`paloalto_firewall.backup_config` saves each firewall's running configuration (`show config running`) as XML in the `paloalto_firewall_backups` folder of your Home Assistant config, named `<hostname>_<date>-<time>.xml`. Home Assistant's own backups then include it. A firewall whose config hasn't changed since its newest backup isn't saved again, and `keep` (default 30) caps how many are kept per firewall. Run it from a nightly automation:
+`paloalto_firewall.backup_config` saves each firewall's running configuration (`show config running`) as XML in the `paloalto_firewall_backups` folder of your Home Assistant config, one subfolder per firewall (by serial number), named `<hostname>_<UTC time>.xml`. Backups made by v0.8 sit at the top level of that folder; they're left alone (never moved or pruned), so delete them yourself when you no longer need them. Home Assistant's own backups then include it. A firewall whose config hasn't changed since its newest backup isn't saved again, and `keep` (default 30) caps how many are kept per firewall. Run it from a nightly automation:
 
 ```yaml
 triggers:
@@ -351,7 +351,7 @@ The Palo Alto Networks icon and logo ship in `custom_components/paloalto_firewal
 
 ### Startup
 
-Setup only waits for each firewall's status read (in parallel, 10 s timeout), so it adds a couple of seconds to Home Assistant's start. Network data (interfaces, routing, BGP, certificates) arrives in the background right after, and its entities appear with it; update checks and the threat log start once Home Assistant has finished starting. API keys are kept between restarts, so the slow keygen only runs when a key has expired. When Home Assistant stops, requests still in flight are cancelled.
+Setup only waits for each firewall's status reads, in parallel, so it normally adds a couple of seconds to Home Assistant's start (`show system info` has a 10 s timeout; the other status reads 30 s, and a key has to be generated on first run, so a firewall that's slow or half-reachable can take longer). Network data (interfaces, routing, BGP, certificates) arrives in the background right after, and its entities appear with it; update checks and the threat log start once Home Assistant has finished starting. API keys are kept between restarts (in a private file tied to the username and password, so new credentials start fresh), so the slow keygen only runs when a key has expired or the credentials changed. When Home Assistant stops, requests still in flight are cancelled.
 
 ### Polling tiers
 

@@ -157,15 +157,38 @@ def cert_uid_suffix(name: str, vsys: Any) -> str:
     return f"cert_{name_key(name, vsys)}"
 
 
-def migrate_unique_id(hass: HomeAssistant, domain: str, old: str, new: str) -> None:
-    """Move an entity to a new unique id, keeping its entity_id and customisations."""
+def migrate_unique_id(
+    hass: HomeAssistant,
+    domain: str,
+    old: str,
+    new: str,
+    original_name: str | None = None,
+    device_identifier: tuple[str, str] | None = None,
+) -> None:
+    """Move an entity to a new unique id, keeping its entity_id and customisations.
+
+    Old ids were lossy slugs ("vpn.a" and "vpn_a" shared one), so when
+    ``original_name`` is given the entity only moves if it was created for
+    that exact name.
+    """
     from homeassistant.helpers import entity_registry as er
 
     registry = er.async_get(hass)
     if registry.async_get_entity_id(domain, DOMAIN, new):
         return
-    if entity_id := registry.async_get_entity_id(domain, DOMAIN, old):
-        registry.async_update_entity(entity_id, new_unique_id=new)
+    if not (entity_id := registry.async_get_entity_id(domain, DOMAIN, old)):
+        return
+    entity = registry.async_get(entity_id)
+    if original_name is not None and entity and entity.original_name not in (None, original_name):
+        return
+    if device_identifier is not None:
+        # Only move it if it belongs to the device it's being migrated for.
+        from homeassistant.helpers import device_registry as dr
+
+        device = dr.async_get(hass).async_get(entity.device_id) if entity and entity.device_id else None
+        if device is None or device_identifier not in device.identifiers:
+            return
+    registry.async_update_entity(entity_id, new_unique_id=new)
 
 
 def logical_routers(data: dict[str, Any]) -> list[str]:
@@ -252,8 +275,13 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             self._optional(unit, "interfaces", CMD_INTERFACE_ALL, parsers.parse_interfaces),
             self._optional(unit, "fib", CMD_FIB, parsers.parse_fib),
             self._optional(unit, "path_monitor", CMD_PATH_MONITOR, parsers.parse_path_monitor),
-            self._optional(unit, "routes_ipv4", CMD_ROUTES.format("ipv4"), parsers.parse_default_routes),
-            self._optional(unit, "routes_ipv6", CMD_ROUTES.format("ipv6"), parsers.parse_default_routes),
+            # The full routing table can be large (BGP): decode it off the loop.
+            self._optional(
+                unit, "routes_ipv4", CMD_ROUTES.format("ipv4"), parsers.parse_default_routes, executor=True
+            ),
+            self._optional(
+                unit, "routes_ipv6", CMD_ROUTES.format("ipv6"), parsers.parse_default_routes, executor=True
+            ),
         )
         # Current GlobalProtect users come from the unit's own status poll
         # rather than a second identical API call.
@@ -324,7 +352,9 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             # disconnecting.
             self._fire_gp_events(data["gp_users"], unit_changed)
         system = (unit.coordinator.data or {}).get("system") or {}
-        offset = parsers.firewall_utc_offset(system.get("time"), now)
+        offset = parsers.firewall_utc_offset(
+            system.get("time"), (unit.coordinator.data or {}).get("fetched_at") or now
+        )
         if offset is not None:
             self._utc_offset = offset
         data["utc_offset_minutes"] = self._utc_offset
@@ -452,9 +482,11 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             "prefix_pools": prefix_pools,
             "bgp": bgp,
             "gp_previous": gp_previous,
+            # None for a list that couldn't be read (as opposed to empty), so
+            # a failed read doesn't look like every certificate vanishing.
             "certificates": None
             if certs_device is None and certs_store is None
-            else {"device": certs_device or [], "store": certs_store or []},
+            else {"device": certs_device, "store": certs_store},
         }
         if prefix_ok:
             self._fire_prefix_events(prefix_pools)
@@ -630,8 +662,12 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             key = (lr, fam)
             cur = routes.get(lr, {}).get(fam)
             if cur and cur.get("distance") is not None:
-                base = min(self._route_base.get(key, STATIC_ROUTE_DISTANCE), cur["distance"])
-                self._route_base[key] = base
+                # The usual distance is the lowest seen. Until a static route
+                # has been seen at its normal distance, assume PAN-OS's default
+                # (10), so a restart while on a floating backup still shows it.
+                # Learned routes (BGP, OSPF...) start from their own distance.
+                seed = STATIC_ROUTE_DISTANCE if cur.get("protocol") == "static" else cur["distance"]
+                self._route_base[key] = min(self._route_base.get(key, seed), cur["distance"])
             base = self._route_base.get(key, STATIC_ROUTE_DISTANCE)
             on_backup = bool(cur and (cur.get("distance") or 0) > base)
             change = None
