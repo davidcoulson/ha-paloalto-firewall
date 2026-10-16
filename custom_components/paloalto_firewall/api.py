@@ -220,6 +220,8 @@ class PanOSClient:
         finally:
             if task is not None:
                 self._inflight.discard(task)
+        if 300 <= status < 400:
+            raise PanOSConnectionError(f"HTTP {status} redirect from {self.host}: redirects are disabled")
         if status in (401, 403):
             if "not authorized for user role" in text.lower():
                 parse_response(text)  # raises PanOSApiError(code "403"): a role limit, not a bad key
@@ -238,6 +240,7 @@ class PanOSClient:
                     self._url,
                     data=data,
                     headers=headers,
+                    allow_redirects=False,
                     timeout=aiohttp.ClientTimeout(total=timeout),
                 ) as resp:
                     text = await resp.text()
