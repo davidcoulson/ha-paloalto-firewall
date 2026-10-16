@@ -1798,3 +1798,35 @@ async def test_same_name_certificate_repairs_keep_full_identity(hass: HomeAssist
     repairs.async_evaluate()
     assert len(cert_issues()) == 2
     assert set(cert_issues()) < set(before)
+
+
+async def test_optional_unit_entities_discovered_after_recovery(hass: HomeAssistant, fake) -> None:
+    from homeassistant.helpers import entity_registry as er
+
+    fake.fail = {cmd: "error" for cmd in (const.CMD_ENVIRONMENTALS, const.CMD_GP_USERS, const.CMD_IPSEC_SA)}
+    for unit in fake.units.values():
+        unit["gp"] = "0.0.0"
+    entry = await _setup(hass, fake)
+    suffixes = ("temperature", "globalprotect_users", "ipsec_tunnels", "hardware_alarm", "gp_client_update")
+    reg = er.async_get(hass)
+
+    def optional_ids():
+        return {e.unique_id for e in er.async_entries_for_config_entry(reg, entry.entry_id)
+                if any(e.unique_id == f"{u.config.serial}_{s}" for u in entry.runtime_data.units for s in suffixes)}
+
+    assert optional_ids() == set()
+    fake.fail = {}
+    for unit in fake.units.values():
+        unit["gp"] = "6.3.3-c1046"
+    for unit in entry.runtime_data.units:
+        await unit.coordinator.async_refresh()
+    await hass.async_block_till_done(wait_background_tasks=True)
+    expected = {f"{u.config.serial}_{s}" for u in entry.runtime_data.units for s in suffixes}
+    assert optional_ids() == expected
+    for unit in entry.runtime_data.units:
+        await unit.coordinator.async_refresh()
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert optional_ids() == expected
+    coordinators = [u.coordinator for u in entry.runtime_data.units]
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    assert all(not c._listeners for c in coordinators)

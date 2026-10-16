@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from functools import partial
 from typing import Any
 
+from homeassistant.core import callback
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity import Entity, EntityDescription
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN, MANUFACTURER, pair_identifier
@@ -108,3 +112,23 @@ class PanOSNetworkEntity(CoordinatorEntity[PanOSNetworkCoordinator]):
     @property
     def available(self) -> bool:
         return super().available and self.coordinator.data is not None
+
+
+def track_unit_entities(
+    entry: PanOSConfigEntry,
+    async_add_entities: AddConfigEntryEntitiesCallback,
+    build: Callable[[PanOSUnit], list[Entity]],
+) -> None:
+    """Discover optional entities after recovery; keep one of each until unload."""
+    added: set[str] = set()
+
+    @callback
+    def _sync(unit: PanOSUnit) -> None:
+        new = [entity for entity in build(unit) if entity.unique_id not in added]
+        if new:
+            added.update(str(entity.unique_id) for entity in new)
+            async_add_entities(new)
+
+    for unit in entry.runtime_data.units:
+        _sync(unit)
+        entry.async_on_unload(unit.coordinator.async_add_listener(partial(_sync, unit)))

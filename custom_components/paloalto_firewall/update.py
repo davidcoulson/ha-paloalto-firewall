@@ -9,7 +9,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .coordinator import PanOSConfigEntry, PanOSUnit
-from .entity import PanOSUpdatesEntity
+from .entity import PanOSUpdatesEntity, track_unit_entities
 from .parsers import (
     content_version_key,
     gp_version_key,
@@ -29,14 +29,17 @@ async def async_setup_entry(
     entry: PanOSConfigEntry,
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
-    entities: list[UpdateEntity] = []
-    for unit in entry.runtime_data.units:
-        entities.append(PanOSSoftwareUpdate(entry, unit, SOFTWARE))
-        entities.append(PanOSContentUpdate(entry, unit, CONTENT))
+    def _entities(unit: PanOSUnit) -> list[UpdateEntity]:
+        entities: list[UpdateEntity] = [
+            PanOSSoftwareUpdate(entry, unit, SOFTWARE),
+            PanOSContentUpdate(entry, unit, CONTENT),
+        ]
         system = (unit.coordinator.data or {}).get("system") or {}
         if system.get("gp_client_version") not in (None, "", "0.0.0"):
             entities.append(PanOSGPClientUpdate(entry, unit, GP_CLIENT))
-    async_add_entities(entities)
+        return entities
+
+    track_unit_entities(entry, async_add_entities, _entities)
 
 
 class _PanOSUpdate(PanOSUpdatesEntity, UpdateEntity):

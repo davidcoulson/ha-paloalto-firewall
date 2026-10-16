@@ -19,7 +19,13 @@ from homeassistant.util import dt as dt_util
 
 from .const import CERT_WARN_DAYS, DOMAIN, lr_identifier
 from .coordinator import PanOSConfigEntry
-from .entity import PanOSNetworkEntity, PanOSPairEntity, PanOSUnitEntity, PanOSUpdatesEntity
+from .entity import (
+    PanOSNetworkEntity,
+    PanOSPairEntity,
+    PanOSUnitEntity,
+    PanOSUpdatesEntity,
+    track_unit_entities,
+)
 from .network import (
     lr_device_info,
     migrate_network_unique_ids,
@@ -105,12 +111,12 @@ async def async_setup_entry(
     runtime = entry.runtime_data
     paired = runtime.pair is not None
     entities: list[BinarySensorEntity] = []
+    track_unit_entities(
+        entry, async_add_entities,
+        lambda unit: [PanOSUnitBinary(entry, unit, desc) for desc in UNIT_BINARY
+                      if desc.exists_fn(unit.coordinator.data, paired)],
+    )
     for unit in runtime.units:
-        entities.extend(
-            PanOSUnitBinary(entry, unit, desc)
-            for desc in UNIT_BINARY
-            if desc.exists_fn(unit.coordinator.data, paired)
-        )
         entities.append(PanOSLicenseBinary(entry, unit, LICENSE_BINARY))
     if runtime.pair:
         entities.append(PanOSPairHealth(entry, runtime.pair, PAIR_HEALTH))
