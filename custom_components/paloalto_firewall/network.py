@@ -237,6 +237,7 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         )
         self.configured_interfaces = selected_interfaces
         self.unit_hostname: str | None = None
+        self.unit_serial: str | None = None
         self._prev_counters: dict[str, tuple[float, dict[str, Any]]] = {}
         self._prev_egress: dict[tuple[str, int], str | None] = {}
         self._prev_prefix: dict[str, str | None] = {}
@@ -292,12 +293,13 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
 
     async def _async_update_data(self) -> dict[str, Any]:
         unit = pick_unit(self.config_entry)
-        if unit.config.hostname != self.unit_hostname:
+        if unit.config.serial != self.unit_serial:
             # Different box (failover): counters aren't comparable.
             self._prev_counters.clear()
-            self.unit_hostname = unit.config.hostname
+            self.unit_serial = unit.config.serial
+        self.unit_hostname = unit.config.hostname
 
-        unit_changed = unit.config.hostname != self._slow.get("unit")
+        unit_changed = unit.config.serial != self._slow.get("unit_serial")
         interfaces, fib, path_monitors, routes_v4, routes_v6 = await gather_reads(
             self._optional(unit, "interfaces", CMD_INTERFACE_ALL, parsers.parse_interfaces),
             self._optional(unit, "fib", CMD_FIB, parsers.parse_fib),
@@ -312,8 +314,8 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         )
         now = dt_util.utcnow()
         if any(value is not None for value in (interfaces, fib, path_monitors, routes_v4, routes_v6)):
-            self._live_at[unit.config.hostname] = now
-        live_at = self._live_at.get(unit.config.hostname)
+            self._live_at[unit.config.serial] = now
+        live_at = self._live_at.get(unit.config.serial)
         if live_at is None or now - live_at > self.freshness_grace:
             raise UpdateFailed(f"{unit.config.host}: no recent successful network read")
         # Current GlobalProtect users come from the unit's own status poll
@@ -330,7 +332,7 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         gp_current = None if gp_status is None else gp_status.get("sessions", [])
         # A failed read keeps the last good value from the same firewall, so a
         # single hiccup doesn't look like every route/monitor vanishing.
-        prev = self.data if self.data and self.data.get("unit") == unit.config.hostname else {}
+        prev = self.data if self.data and self.data.get("unit_serial") == unit.config.serial else {}
         interfaces_ok = interfaces is not None
         if interfaces is None:
             interfaces = prev.get("interfaces")
@@ -353,6 +355,7 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             path_monitors = prev.get("path_monitors")
         data: dict[str, Any] = {
             "unit": unit.config.hostname,
+            "unit_serial": unit.config.serial,
             "interfaces": interfaces,
             "fib": fib,
             "path_monitors": path_monitors,
@@ -386,7 +389,9 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         if unit_changed or self._slow_at is None or now - self._slow_at >= self.slow_interval:
             await self._refresh_slow(unit, interfaces)
             self._slow_at = now
-        data.update({k: v for k, v in self._slow.items() if k not in ("unit", "bgp_ok", "certs_device_ok")})
+        data.update({
+            k: v for k, v in self._slow.items() if k not in ("unit_serial", "bgp_ok", "certs_device_ok")
+        })
         data["gp_users"] = (
             self._gp_users(gp_current, data.get("gp_previous")) if gp_current is not None else None
         )
@@ -509,7 +514,7 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             self._optional(unit, "certs_device", CMD_CERTS_DEVICE, parsers.parse_device_certs, executor=True),
             self._optional(unit, "certs_store", CMD_CERTS_STORE, parsers.parse_cert_store),
         )
-        same_unit = self._slow.get("unit") == unit.config.hostname
+        same_unit = self._slow.get("unit_serial") == unit.config.serial
         prefix_ok = prefix_pools is not None
         if prefix_pools is None:
             prefix_pools = self._slow.get("prefix_pools", {}) if same_unit else {}
@@ -517,7 +522,7 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         if bgp is None:
             bgp = self._slow.get("bgp", {}) if same_unit else {}
         self._slow = {
-            "unit": unit.config.hostname,
+            "unit_serial": unit.config.serial,
             "bgp_ok": bgp_ok,
             "certs_device_ok": certs_device is not None,
             "jobs": jobs,

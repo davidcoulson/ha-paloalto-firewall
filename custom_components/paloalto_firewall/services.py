@@ -250,7 +250,7 @@ async def _network_state(
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """Interfaces (cached when from the same firewall) and a fresh FIB."""
     cached = getattr(entry.runtime_data.network, "data", None)
-    if cached and cached.get("unit") == unit.config.hostname:
+    if cached and cached.get("unit_serial") == unit.config.serial:
         interfaces = cached["interfaces"]
     else:
         interfaces = parsers.parse_interfaces(await unit.client.op(CMD_INTERFACE_ALL))

@@ -1830,3 +1830,65 @@ async def test_optional_unit_entities_discovered_after_recovery(hass: HomeAssist
     coordinators = [u.coordinator for u in entry.runtime_data.units]
     assert await hass.config_entries.async_unload(entry.entry_id)
     assert all(not c._listeners for c in coordinators)
+
+
+async def test_same_hostname_failover_uses_serial(hass: HomeAssistant, fake, monkeypatch) -> None:
+    from custom_components.paloalto_firewall import network as network_module
+    from custom_components.paloalto_firewall.services import _network_state
+
+    for unit in fake.units.values():
+        unit["hostname"] = "shared"
+    entry = await _setup(hass, fake)
+    network = entry.runtime_data.network
+    first, second = entry.runtime_data.units
+    assert network.data["unit_serial"] == first.config.serial
+    await network.async_refresh()
+    assert any(c["in_kbps"] is not None for c in network.data["counters"].values())
+
+    # Service lookups must read this unit's interfaces despite the equal hostname.
+    before = fake.calls.count((second.config.host, const.CMD_INTERFACE_ALL))
+    await _network_state(entry, second)
+    assert fake.calls.count((second.config.host, const.CMD_INTERFACE_ALL)) == before + 1
+    before = fake.calls.count((first.config.host, const.CMD_INTERFACE_ALL))
+    await _network_state(entry, first)
+    assert fake.calls.count((first.config.host, const.CMD_INTERFACE_ALL)) == before
+
+    events = async_capture_events(hass, "paloalto_firewall_bgp_peer_change")
+    fake.dns_bgp_up = False
+    monkeypatch.setattr(network_module, "pick_unit", lambda entry: second)
+    await network.async_refresh()
+    assert network.last_update_success
+    assert network.data["unit_serial"] == second.config.serial
+    assert events == []
+    assert all(c["in_kbps"] is None for c in network.data["counters"].values())
+    assert network._slow["unit_serial"] == second.config.serial
+
+
+@pytest.mark.parametrize("failed", ["interfaces", "live", "slow"])
+async def test_same_hostname_failover_does_not_reuse_other_unit_cache(
+    hass: HomeAssistant, fake, monkeypatch, failed
+) -> None:
+    from custom_components.paloalto_firewall import network as network_module
+
+    for unit in fake.units.values():
+        unit["hostname"] = "shared"
+    entry = await _setup(hass, fake)
+    network = entry.runtime_data.network
+    second = entry.runtime_data.units[1]
+    monkeypatch.setattr(network_module, "pick_unit", lambda entry: second)
+    if failed == "slow":
+        fake.fail = {const.CMD_BGP_SUMMARY: "error", const.CMD_PD_POOLS: "error"}
+    elif failed == "interfaces":
+        fake.fail = {const.CMD_INTERFACE_ALL: "error"}
+    else:
+        fake.fail = {cmd: "error" for cmd in (
+            const.CMD_INTERFACE_ALL, const.CMD_FIB, const.CMD_PATH_MONITOR,
+            const.CMD_ROUTES.format("ipv4"), const.CMD_ROUTES.format("ipv6"),
+        )}
+    await network.async_refresh()
+    if failed == "slow":
+        assert network.last_update_success
+        assert network.data["bgp"] == {}
+        assert network.data["prefix_pools"] == {}
+    else:
+        assert not network.last_update_success
