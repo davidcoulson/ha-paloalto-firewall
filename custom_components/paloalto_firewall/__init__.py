@@ -70,6 +70,18 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: PanOSConfigEntry) -> bool:
+    units: list[PanOSUnit] = []
+    try:
+        return await _async_setup_entry(hass, entry, units)
+    except BaseException:
+        for unit in units:
+            unit.client.close()
+        raise
+
+
+async def _async_setup_entry(
+    hass: HomeAssistant, entry: PanOSConfigEntry, units: list[PanOSUnit]
+) -> bool:
     session = async_get_clientsession(hass, verify_ssl=entry.data[CONF_VERIFY_SSL])
     scan = timedelta(seconds=entry.options.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL))
     update_every = timedelta(hours=entry.options.get(CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL))
@@ -92,7 +104,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: PanOSConfigEntry) -> boo
 
         return _save
 
-    units: list[PanOSUnit] = []
     for index, raw in enumerate(entry.data[CONF_UNITS]):
         unit = UnitConfig(
             index=index,
@@ -126,6 +137,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: PanOSConfigEntry) -> boo
             pan_unit.client.close()
 
     entry.async_on_unload(hass.bus.async_listen(EVENT_HOMEASSISTANT_STOP, _on_stop))
+    for pan_unit in units:
+        entry.async_on_unload(pan_unit.client.close)
 
     # The only reads setup waits for: each unit's status (system info, HA
     # state), run in parallel. One unit being down (e.g. mid-upgrade) must

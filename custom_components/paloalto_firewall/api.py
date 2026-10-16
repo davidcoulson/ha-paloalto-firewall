@@ -95,7 +95,7 @@ class PanOSClient:
         self._closed = False
 
     def close(self) -> None:
-        """Refuse new requests and cancel those in flight (Home Assistant is stopping)."""
+        """Refuse new requests and cancel those in flight."""
         self._closed = True
         for task in list(self._inflight):
             task.cancel()

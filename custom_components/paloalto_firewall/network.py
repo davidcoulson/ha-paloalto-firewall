@@ -6,7 +6,6 @@ from whichever firewall is active (or the only firewall, when standalone).
 
 from __future__ import annotations
 
-import asyncio
 import ipaddress
 import logging
 import time
@@ -22,6 +21,7 @@ from homeassistant.util import dt as dt_util
 
 from . import parsers
 from .api import PanOSAuthError, PanOSError
+from .async_utils import gather_reads
 from .const import (
     CMD_BGP_PEERS_LR,
     CMD_BGP_SUMMARY,
@@ -273,7 +273,7 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             self.unit_hostname = unit.config.hostname
 
         unit_changed = unit.config.hostname != self._slow.get("unit")
-        interfaces, fib, path_monitors, routes_v4, routes_v6 = await asyncio.gather(
+        interfaces, fib, path_monitors, routes_v4, routes_v6 = await gather_reads(
             self._optional(unit, "interfaces", CMD_INTERFACE_ALL, parsers.parse_interfaces),
             self._optional(unit, "fib", CMD_FIB, parsers.parse_fib),
             self._optional(unit, "path_monitor", CMD_PATH_MONITOR, parsers.parse_path_monitor),
@@ -475,7 +475,7 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         self._slow_at = None
 
     async def _refresh_slow(self, unit: PanOSUnit, interfaces: dict[str, Any]) -> None:
-        jobs, pending, prefix_pools, bgp, gp_previous, certs_device, certs_store = await asyncio.gather(
+        jobs, pending, prefix_pools, bgp, gp_previous, certs_device, certs_store = await gather_reads(
             self._optional(unit, "jobs", CMD_JOBS, parsers.parse_jobs),
             self._optional(unit, "pending", CMD_PENDING_CHANGES, parsers.parse_pending_changes),
             self._prefix_pools(unit, interfaces),
@@ -522,7 +522,7 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         if not summary:
             return {}
         enabled = [lr for lr, info in summary.items() if info["enabled"]]
-        peers = await asyncio.gather(
+        peers = await gather_reads(
             *(
                 self._optional(unit, f"bgp_peers {lr}", CMD_BGP_PEERS_LR.format(lr), parsers.parse_bgp_peers)
                 for lr in enabled
@@ -650,7 +650,7 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
 
         now = time.monotonic()
         out: dict[str, dict[str, Any]] = {}
-        for name, counters in await asyncio.gather(*(one(n) for n in names)):
+        for name, counters in await gather_reads(*(one(n) for n in names)):
             if counters is None:
                 continue
             rates = {"in_kbps": None, "out_kbps": None}

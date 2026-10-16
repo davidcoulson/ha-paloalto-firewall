@@ -1578,3 +1578,91 @@ async def test_network_ignores_stale_successful_gp_status(hass: HomeAssistant, f
     assert network.last_update_success
     assert network.data["gp_current"] is None
     assert network.data["gp_users"] is None
+
+
+@pytest.mark.parametrize("poll", ["status", "updates", "network", "slow_network"])
+async def test_poll_failure_cancels_and_awaits_siblings(hass: HomeAssistant, fake, monkeypatch, poll) -> None:
+    from homeassistant.exceptions import ConfigEntryAuthFailed
+
+    entry = await _setup(hass, fake)
+    runtime = entry.runtime_data
+    coordinator = {
+        "status": runtime.units[0].coordinator,
+        "updates": runtime.units[0].updates,
+        "network": runtime.network,
+        "slow_network": runtime.network,
+    }[poll]
+    started = asyncio.Event()
+    calls = []
+    finished = []
+
+    async def read(*args, **kwargs):
+        index = len(calls)
+        calls.append(index)
+        if index == 0:
+            await started.wait()
+            raise ConfigEntryAuthFailed("expired credentials")
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            await asyncio.sleep(0)
+            finished.append(index)
+
+    monkeypatch.setattr(coordinator, "_optional", read)
+    with pytest.raises(ConfigEntryAuthFailed, match="expired credentials"):
+        if poll == "slow_network":
+            await coordinator._refresh_slow(runtime.units[0], runtime.network.data["interfaces"])
+        else:
+            await coordinator._async_update_data()
+    assert len(calls) > 1
+    assert sorted(finished) == calls[1:]
+
+
+async def test_unload_closes_clients_and_cancels_reads(hass: HomeAssistant, fake) -> None:
+    from custom_components.paloalto_firewall.const import CMD_INTERFACE_ALL
+
+    entry = await _setup(hass, fake)
+    units = entry.runtime_data.units
+    fake.hold = asyncio.Event()
+    fake.hold_cmd = CMD_INTERFACE_ALL
+    task = asyncio.create_task(units[0].client.op(CMD_INTERFACE_ALL))
+    while not fake.held:
+        await asyncio.sleep(0)
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert all(u.client._closed and not u.client._inflight for u in units)
+
+
+@pytest.mark.parametrize("failure", ["status", "platforms"])
+async def test_failed_setup_closes_clients(hass: HomeAssistant, fake, monkeypatch, failure) -> None:
+    from unittest.mock import AsyncMock
+
+    from custom_components.paloalto_firewall.api import PanOSClient
+
+    clients = []
+    original_init = PanOSClient.__init__
+
+    def init(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        clients.append(self)
+
+    monkeypatch.setattr(PanOSClient, "__init__", init)
+    if failure == "status":
+        fake.bad_password = True
+    else:
+        monkeypatch.setattr(
+            hass.config_entries, "async_forward_entry_setups", AsyncMock(side_effect=RuntimeError("failed"))
+        )
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_NAME: "Edge", CONF_USERNAME: "u", CONF_PASSWORD: "p", CONF_VERIFY_SSL: False,
+            CONF_UNITS: [{"host": "fw1.lan", "serial": "0123456789001", "hostname": "fw1"}],
+        },
+    )
+    entry.add_to_hass(hass)
+    assert not await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert clients and all(c._closed and not c._inflight for c in clients)
