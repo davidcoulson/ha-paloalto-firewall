@@ -1281,7 +1281,10 @@ def certs_expiring(
     for c in store:
         expires = datetime.fromisoformat(c["expires"])
         days = (expires - now).total_seconds() / 86400
-        item = {"name": c["name"], "expires": c["expires"], "days_left": int(days // 1)}
+        item = {
+            "name": c["name"], "serial": c.get("serial"), "issuer": c.get("issuer"),
+            "expires": c["expires"], "days_left": int(days // 1),
+        }
         if c.get("status") == "revoked":
             continue
         if days < 0 or c.get("status") == "expired":

@@ -1771,3 +1771,30 @@ async def test_certificate_problem_includes_expired(hass: HomeAssistant, fake, d
     network.data["certificates"]["store"] = None
     assert sensor.is_on is None
     assert not sensor.available
+
+
+async def test_same_name_certificate_repairs_keep_full_identity(hass: HomeAssistant, fake) -> None:
+    from homeassistant.helpers import issue_registry as ir
+
+    from custom_components.paloalto_firewall.repairs import PanOSRepairs
+
+    entry = await _setup(hass, fake)
+    store = [{
+        "name": "shared-cn", "serial": serial, "issuer": issuer,
+        "expires": (dt_util.utcnow() - timedelta(days=1)).isoformat(),
+    } for serial, issuer in (("1", "ca-a"), ("2", "ca-a"), ("1", "ca-b"))]
+    entry.runtime_data.network.data["certificates"]["store"] = store
+    repairs = PanOSRepairs(hass, entry)
+    repairs.async_evaluate()
+    registry = ir.async_get(hass)
+
+    def cert_issues():
+        return {k: v for k, v in registry.issues.items()
+                if k[0] == DOMAIN and v.translation_key.startswith("certificate_")}
+
+    before = cert_issues()
+    assert len(before) == 3
+    store.pop(0)
+    repairs.async_evaluate()
+    assert len(cert_issues()) == 2
+    assert set(cert_issues()) < set(before)
