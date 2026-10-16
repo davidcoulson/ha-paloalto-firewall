@@ -914,7 +914,8 @@ def nptv6_mismatches(rules: dict[str, dict[str, Any]], pool: dict[str, Any]) -> 
     """NPTv6 rules for this pool's WAN that don't fit the delegated prefix.
 
     A rule belongs to the pool's WAN when its to-interface is the pool's
-    interface, or (for inbound rules without one) it sits in the same vsys.
+    interface. Inbound rules without a to-interface have unknown ownership
+    and are skipped.
     Returns (problems, rules checked).
     """
     problems: list[str] = []
@@ -930,7 +931,7 @@ def nptv6_mismatches(rules: dict[str, dict[str, Any]], pool: dict[str, Any]) -> 
         if to_if and to_if != pool["interface"]:
             continue
         info = nptv6_prefixes(rule)
-        if info["direction"] is None:
+        if info["direction"] is None or (info["direction"] == "inbound" and not to_if):
             continue
         checked.append(name)
         if info["dynamic"]:

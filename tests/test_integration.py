@@ -523,7 +523,6 @@ async def test_prefix_pools_and_npt_mismatch(hass: HomeAssistant, fake, freezer)
     assert bad.state == "on"
     assert bad.attributes["problems"] == [
         "NPT: outbound uses 2001:db8:aaa:f0::/60, outside delegated 2001:db8:a00::/56",
-        "NPT (#2): inbound uses 2001:db8:aaa:f0::/60, outside delegated 2001:db8:a00::/56",
     ]
     assert st("binary_sensor.edge_ha_pair_wan_b_nptv6_prefix_mismatch").state == "off"
 

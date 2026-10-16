@@ -201,3 +201,18 @@ def test_gp_session_bad_timestamps():
 def test_malformed_optional_json_raises_value_error(parser, payload):
     with pytest.raises(ValueError):
         parser(parse_response(fakefw.OK.format(f"<json>{payload}</json>")))
+
+
+@pytest.mark.parametrize("interface", ["ethernet1/1", "ethernet1/2"])
+def test_inbound_nptv6_requires_known_pool_ownership(interface):
+    rules = parsers.parse_running_nat(parse_response(fakefw.running_nat("vsys2")))
+    inbound = {"inbound": rules["NPT (#2)"]}
+    pool = {"name": "wan", "prefix": "2001:db8:a00::/56", "interface": interface}
+    assert parsers.nptv6_mismatches(inbound, pool) == ([], [])
+    inbound["inbound"]["to_interface"] = "ethernet1/1"
+    problems, checked = parsers.nptv6_mismatches(inbound, pool)
+    if interface == "ethernet1/1":
+        assert checked == ["inbound"]
+        assert len(problems) == 1 and "outside delegated" in problems[0]
+    else:
+        assert (problems, checked) == ([], [])
