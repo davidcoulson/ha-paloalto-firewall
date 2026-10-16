@@ -1547,3 +1547,34 @@ async def test_repeated_full_reads_do_not_extend_the_cap(
     for _ in range(3):  # each later read returns 2 already-known entries: no gap
         await _tick(hass, freezer, 61)
     assert hass.states.get("sensor.edge_ha_pair_threats_24h").attributes["count_capped"] is False
+
+
+async def test_network_cache_expires_and_recovers(hass: HomeAssistant, fake, freezer) -> None:
+    entry = await _setup(hass, fake)
+    network = entry.runtime_data.network
+    link = "binary_sensor.edge_ha_pair_ethernet1_1_link"
+    for unit in fake.units.values():
+        unit["up"] = False
+    await _tick(hass, freezer, 61)
+    assert network.last_update_success
+    assert hass.states.get(link).state == "on"
+    assert network.data["gp_current"] is None
+    assert network.data["gp_users"] is None
+    await _tick(hass, freezer, int(network.freshness_grace.total_seconds()) + 1)
+    assert not network.last_update_success
+    assert hass.states.get(link).state == "unavailable"
+    fake.units["fw1.lan"]["up"] = True
+    await _tick(hass, freezer, 61)
+    assert network.last_update_success
+    assert hass.states.get(link).state == "on"
+
+
+async def test_network_ignores_stale_successful_gp_status(hass: HomeAssistant, fake, freezer) -> None:
+    entry = await _setup(hass, fake)
+    network = entry.runtime_data.network
+    assert network.data["gp_current"]
+    freezer.tick(network.freshness_grace + timedelta(seconds=1))
+    await network.async_refresh()
+    assert network.last_update_success
+    assert network.data["gp_current"] is None
+    assert network.data["gp_users"] is None

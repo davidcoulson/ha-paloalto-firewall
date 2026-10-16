@@ -222,6 +222,8 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         self.slow_interval = timedelta(seconds=SLOW_INTERVAL)
         self._slow_at: datetime | None = None
         self._slow: dict[str, Any] = {}
+        self.freshness_grace = max(interval * 3, timedelta(minutes=3))
+        self._live_at: dict[str, datetime] = {}
         self._prev_gp: dict[str, bool] = {}
         self._gp_known: set[str] = set()
         self._gp_seen: dict[str, dict[str, Any]] = {}
@@ -283,9 +285,23 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 unit, "routes_ipv6", CMD_ROUTES.format("ipv6"), parsers.parse_default_routes, executor=True
             ),
         )
+        now = dt_util.utcnow()
+        if any(value is not None for value in (interfaces, fib, path_monitors, routes_v4, routes_v6)):
+            self._live_at[unit.config.hostname] = now
+        live_at = self._live_at.get(unit.config.hostname)
+        if live_at is None or now - live_at > self.freshness_grace:
+            raise UpdateFailed(f"{unit.config.host}: no recent successful network read")
         # Current GlobalProtect users come from the unit's own status poll
         # rather than a second identical API call.
-        gp_status = (unit.coordinator.data or {}).get("gp_users")
+        status = unit.coordinator.data or {}
+        fetched_at = status.get("fetched_at")
+        gp_status = (
+            status.get("gp_users")
+            if unit.coordinator.last_update_success
+            and fetched_at is not None
+            and now - fetched_at <= self.freshness_grace
+            else None
+        )
         gp_current = None if gp_status is None else gp_status.get("sessions", [])
         # A failed read keeps the last good value from the same firewall, so a
         # single hiccup doesn't look like every route/monitor vanishing.
@@ -346,7 +362,9 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             await self._refresh_slow(unit, interfaces)
             self._slow_at = now
         data.update({k: v for k, v in self._slow.items() if k not in ("unit", "bgp_ok", "certs_device_ok")})
-        data["gp_users"] = self._gp_users(gp_current, data.get("gp_previous"))
+        data["gp_users"] = (
+            self._gp_users(gp_current, data.get("gp_previous")) if gp_current is not None else None
+        )
         if gp_current is not None:
             # Unknown current users (read failed) must not look like everyone
             # disconnecting.
