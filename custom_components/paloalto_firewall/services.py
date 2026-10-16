@@ -561,7 +561,16 @@ _LEGACY_RE = r"^{host}_\d{{8}}-\d{{6}}\.xml$"
 
 
 def _safe(name: str) -> str:
-    return re.sub(r"[^A-Za-z0-9._-]+", "_", name) or "firewall"
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", name) or "firewall"
+    if safe in (".", ".."):
+        raise ValueError("Invalid backup path component")
+    return safe
+
+
+def _check_backup_path(path: Path, root: Path) -> None:
+    resolved = path.resolve()
+    if resolved == root or not resolved.is_relative_to(root):
+        raise ValueError("Backup path escapes its directory")
 
 
 def _write_backup(
@@ -573,9 +582,12 @@ def _write_backup(
     another firewall's files, whatever the hostnames. Runs in an executor.
     """
     text = '<?xml version="1.0"?>\n' + ET.tostring(config, encoding="unicode") + "\n"
+    root = root.resolve()
     folder = root / _safe(serial)
-    folder.mkdir(parents=True, exist_ok=True)
     host = _safe(hostname)
+    _check_backup_path(folder, root)
+    folder.mkdir(parents=True, exist_ok=True)
+    folder = folder.resolve()
 
     # v0.8.x backups at the top level are left alone: a hostname doesn't say
     # which firewall (or config entry) they came from, so they're never
@@ -585,10 +597,13 @@ def _write_backup(
         return m["stamp"] if m else ""
 
     existing = sorted((p for p in folder.glob("*.xml") if _BACKUP_RE.match(p.name)), key=stamp_of)
+    for path in existing:
+        _check_backup_path(path, folder)
     if existing and existing[-1].read_text(encoding="utf-8") == text:
         target, unchanged = existing[-1], True
     else:
         target, unchanged = folder / f"{host}_{now.strftime(_STAMP)}.xml", False
+        _check_backup_path(target, folder)
         fd, tmp = tempfile.mkstemp(dir=folder, prefix=".", suffix=".tmp")
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
@@ -600,6 +615,7 @@ def _write_backup(
         existing.append(target)
     removed = []
     for old in existing[:-keep]:
+        _check_backup_path(old, folder)
         old.unlink(missing_ok=True)
         removed.append(old.name)
     return {"file": str(target), "bytes": len(text.encode()), "unchanged": unchanged, "pruned": removed}
