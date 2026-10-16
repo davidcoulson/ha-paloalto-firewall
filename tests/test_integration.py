@@ -1971,3 +1971,44 @@ async def test_malformed_network_json_is_isolated(hass: HomeAssistant, fake, mon
         assert not network.data["bgp"]["core-vr"]["ok"]
     else:
         assert not network.data["sources_ok"]["default_routes"]
+
+
+async def test_fib_parsing_and_egress_share_executor_job(hass: HomeAssistant, fake, monkeypatch) -> None:
+    import threading
+
+    from custom_components.paloalto_firewall import network as network_module
+
+    entry = await _setup(hass, fake)
+    network = entry.runtime_data.network
+    original_parse = network_module.parsers.parse_fib
+    original_lookup = network_module.parsers.fib_lookup
+    main_thread = threading.get_ident()
+    threads = []
+    jobs = []
+    original_job = hass.async_add_executor_job
+
+    def parse(result):
+        threads.append(threading.get_ident())
+        return original_parse(result)
+
+    def lookup(*args):
+        threads.append(threading.get_ident())
+        return original_lookup(*args)
+
+    def job(target, *args):
+        if target is network_module._fib_and_egress:
+            jobs.append(target)
+        return original_job(target, *args)
+
+    monkeypatch.setattr(network_module.parsers, "parse_fib", parse)
+    monkeypatch.setattr(network_module.parsers, "fib_lookup", lookup)
+    monkeypatch.setattr(hass, "async_add_executor_job", job)
+    previous_fib, previous_egress = network.data["fib"], network.data["egress"]
+    await network.async_refresh()
+    assert network.last_update_success
+    assert network.data["fib"] == previous_fib
+    assert network.data["egress"] == previous_egress
+    assert len(jobs) == 1
+    assert len(threads) > 1
+    assert len(set(threads)) == 1
+    assert threads[0] != main_thread

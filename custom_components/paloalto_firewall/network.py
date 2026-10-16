@@ -222,6 +222,24 @@ def logical_routers(data: dict[str, Any]) -> list[str]:
     return sorted(names)
 
 
+def _fib_and_egress(
+    interfaces: dict[str, dict[str, Any]], result: Any, previous: list[dict[str, Any]]
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Parse the FIB and calculate its derived routes in one executor job."""
+    fib = parsers.parse_fib(result) if result is not None else previous
+    data = {"interfaces": interfaces, "fib": fib}
+    derived = {
+        lr: {
+            "ipv4": egress(interfaces, fib, lr, PROBE_IPV4),
+            "ipv6": egress(interfaces, fib, lr, PROBE_IPV6),
+            "routes_ipv4": sum(1 for r in fib if r["logical_router"] == lr and r["version"] == 4),
+            "routes_ipv6": sum(1 for r in fib if r["logical_router"] == lr and r["version"] == 6),
+        }
+        for lr in logical_routers(data)
+    }
+    return fib, derived
+
+
 class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
     config_entry: PanOSConfigEntry
 
@@ -300,9 +318,9 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         self.unit_hostname = unit.config.hostname
 
         unit_changed = unit.config.serial != self._slow.get("unit_serial")
-        interfaces, fib, path_monitors, routes_v4, routes_v6 = await gather_reads(
+        interfaces, fib_result, path_monitors, routes_v4, routes_v6 = await gather_reads(
             self._optional(unit, "interfaces", CMD_INTERFACE_ALL, parsers.parse_interfaces),
-            self._optional(unit, "fib", CMD_FIB, parsers.parse_fib),
+            self._optional(unit, "fib", CMD_FIB, lambda result: result),
             self._optional(unit, "path_monitor", CMD_PATH_MONITOR, parsers.parse_path_monitor),
             # The full routing table can be large (BGP): decode it off the loop.
             self._optional(
@@ -313,7 +331,7 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             ),
         )
         now = dt_util.utcnow()
-        if any(value is not None for value in (interfaces, fib, path_monitors, routes_v4, routes_v6)):
+        if any(value is not None for value in (interfaces, fib_result, path_monitors, routes_v4, routes_v6)):
             self._live_at[unit.config.serial] = now
         live_at = self._live_at.get(unit.config.serial)
         if live_at is None or now - live_at > self.freshness_grace:
@@ -347,9 +365,10 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             self._prev_bgp.clear()
             self._route_prev.clear()
             self._route_base.clear()
-        fib_ok = fib is not None
-        if fib is None:
-            fib = prev.get("fib") or []
+        fib_ok = fib_result is not None
+        fib, derived_egress = await self.hass.async_add_executor_job(
+            _fib_and_egress, interfaces, fib_result, prev.get("fib") or []
+        )
         pm_ok = path_monitors is not None
         if path_monitors is None:
             path_monitors = prev.get("path_monitors")
@@ -362,15 +381,7 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             "gp_current": gp_current,
         }
 
-        data["egress"] = {
-            lr: {
-                "ipv4": egress(interfaces, fib, lr, PROBE_IPV4),
-                "ipv6": egress(interfaces, fib, lr, PROBE_IPV6),
-                "routes_ipv4": sum(1 for r in fib if r["logical_router"] == lr and r["version"] == 4),
-                "routes_ipv6": sum(1 for r in fib if r["logical_router"] == lr and r["version"] == 6),
-            }
-            for lr in logical_routers(data)
-        }
+        data["egress"] = derived_egress
         data["path_groups"] = self._group_path_monitors(interfaces, path_monitors or [])
         data["counters"] = await self._counters(unit, self.selected_interfaces(data))
         if fib_ok:
