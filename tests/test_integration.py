@@ -1755,3 +1755,19 @@ async def test_network_name_ids_and_safe_migration(hass: HomeAssistant, fake) ->
         network_binary_sensors(entry)
         assert reg.async_get(other.entity_id).unique_id == old_uid
         reg.async_remove(other.entity_id)
+
+
+@pytest.mark.parametrize("days, expected", [(-1, True), (10, True), (60, False)])
+async def test_certificate_problem_includes_expired(hass: HomeAssistant, fake, days, expected) -> None:
+    from custom_components.paloalto_firewall.binary_sensor import PanOSCertExpiringSensor
+
+    entry = await _setup(hass, fake)
+    network = entry.runtime_data.network
+    network.data["certificates"]["store"] = [{
+        "name": "only-cert", "expires": (dt_util.utcnow() + timedelta(days=days)).isoformat(),
+    }]
+    sensor = PanOSCertExpiringSensor(entry)
+    assert sensor.is_on is expected
+    network.data["certificates"]["store"] = None
+    assert sensor.is_on is None
+    assert not sensor.available

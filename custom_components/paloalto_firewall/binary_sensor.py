@@ -545,7 +545,7 @@ class PanOSCertExpiringSensor(PanOSNetworkEntity, BinarySensorEntity):
     @property
     def is_on(self) -> bool | None:
         status = self._status()
-        return None if status is None else bool(status["expiring"])
+        return None if status is None else bool(status["expiring"] or status["expired"])
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
