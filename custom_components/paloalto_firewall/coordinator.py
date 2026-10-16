@@ -154,12 +154,8 @@ class PanOSDeviceCoordinator(_BaseCoordinator):
             raise UpdateFailed(f"{self.unit.host}: {err}") from err
 
         if system["serial"] != self.unit.serial:
-            _LOGGER.warning(
-                "%s now reports serial %s but was configured as %s; is the "
-                "management address pointing at the right firewall?",
-                self.unit.host,
-                system["serial"],
-                self.unit.serial,
+            raise UpdateFailed(
+                f"{self.unit.host}: serial {system['serial']} does not match configured {self.unit.serial}"
             )
 
         optional = {

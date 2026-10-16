@@ -1892,3 +1892,55 @@ async def test_same_hostname_failover_does_not_reuse_other_unit_cache(
         assert network.data["prefix_pools"] == {}
     else:
         assert not network.last_update_success
+
+
+@pytest.mark.parametrize("stored, hosts", [
+    (["fw1.lan"], ["fw1.lan", "fw2.lan"]),
+    (["fw1.lan", "fw2.lan"], ["fw2.lan"]),
+    (["fw1.lan", "fw2.lan"], ["fw2.lan", "fw1.lan"]),
+    (["fw2.lan"], ["fw1.lan", "fw2.lan"]),
+])
+async def test_config_flow_rejects_overlapping_serials(hass: HomeAssistant, fake, stored, hosts) -> None:
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_UNITS: [{"serial": fake.units[h]["serial"]} for h in stored]},
+    )
+    entry.add_to_hass(hass)
+    result = await hass.config_entries.flow.async_init(DOMAIN, context={"source": config_entries.SOURCE_USER})
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"],
+        {**USER_INPUT, CONF_PRIMARY_HOST: hosts[0], CONF_SECONDARY_HOST: hosts[1] if len(hosts) > 1 else ""},
+    )
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "already_configured"
+
+
+@pytest.mark.parametrize("changed_host", ["fw1.lan", "fw2.lan"])
+async def test_reauth_rejects_different_serial(hass: HomeAssistant, fake, changed_host) -> None:
+    entry = await _setup(hass, fake)
+    fake.units[changed_host]["serial"] = "replacement"
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": config_entries.SOURCE_REAUTH, "entry_id": entry.entry_id},
+        data=entry.data,
+    )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_USERNAME: "new-user", CONF_PASSWORD: "new-password"}
+    )
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "serial_mismatch"
+    assert entry.data[CONF_USERNAME] == "u"
+    assert entry.data[CONF_PASSWORD] == "p"
+
+
+async def test_status_rejects_different_serial(hass: HomeAssistant, fake) -> None:
+    entry = await _setup(hass, fake)
+    coordinator = entry.runtime_data.units[0].coordinator
+    previous = coordinator.data
+    fake.units["fw1.lan"]["serial"] = "replacement"
+    fake.calls.clear()
+    await coordinator.async_refresh()
+    assert not coordinator.last_update_success
+    assert "serial replacement does not match configured" in str(coordinator.last_exception)
+    assert coordinator.data is previous
+    assert hass.states.get("sensor.fw1_active_sessions").state == "unavailable"
+    assert fake.calls == [("fw1.lan", const.CMD_SYSTEM_INFO)]
