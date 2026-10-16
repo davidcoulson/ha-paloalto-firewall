@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import xml.etree.ElementTree as ET
+from copy import deepcopy
 from typing import Any
 
 from .api import PanOSClient, PanOSError
@@ -31,6 +32,10 @@ from .const import (
 
 _LOGGER = logging.getLogger(__package__)
 MAX_CHARS = 25000
+REDACT_XML_FIELDS = {
+    "username", "primary-username", "computer", "public-ip", "public-ipv6",
+    "virtual-ip", "virtual-ipv6", "srcuser", "misc",
+}
 
 STATIC_PROBES: dict[str, str] = {
     "interface_all": CMD_INTERFACE_ALL,
@@ -58,6 +63,13 @@ def debug_enabled() -> bool:
 
 
 def _dump(el: ET.Element) -> str:
+    # Scrub the XML before serializing or truncating it; callers may still
+    # need the original response for parsing.
+    el = deepcopy(el)
+    for field in el.iter():
+        if field.tag in REDACT_XML_FIELDS:
+            field.clear()
+            field.text = "**REDACTED**"
     text = ET.tostring(el, encoding="unicode")
     return text if len(text) <= MAX_CHARS else text[:MAX_CHARS] + f"... [{len(text)} chars]"
 

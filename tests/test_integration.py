@@ -1666,3 +1666,38 @@ async def test_failed_setup_closes_clients(hass: HomeAssistant, fake, monkeypatc
     assert not await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done(wait_background_tasks=True)
     assert clients and all(c._closed and not c._inflight for c in clients)
+
+
+async def test_diagnostics_redacts_raw_identities(hass: HomeAssistant, fake, monkeypatch) -> None:
+    import json
+
+    from custom_components.paloalto_firewall import probes
+    from custom_components.paloalto_firewall.diagnostics import async_get_config_entry_diagnostics
+
+    seeds = {
+        "username": "seed-vpn-user", "primary-username": "seed-primary-user",
+        "computer": "seed-vpn-computer", "public-ip": "198.51.100.199",
+        "public-ipv6": "2001:db8::199", "virtual-ip": "192.0.2.199",
+        "virtual-ipv6": "2001:db8:1::199",
+    }
+    original_respond = fake.respond
+
+    def respond(host, cmd, *args, **kwargs):
+        if cmd in (const.CMD_GP_USERS, const.CMD_GP_PREVIOUS):
+            fields = "".join(f"<{key}>{value}</{key}>" for key, value in seeds.items())
+            return f'<response status="success"><result><entry>{fields}</entry></result></response>', 200
+        return original_respond(host, cmd, *args, **kwargs)
+
+    monkeypatch.setattr(fake, "respond", respond)
+    for host in fake.units:
+        fake.threats[host] = [{"seqno": 1, "srcuser": "seed-threat-user", "misc": "seed-threat-url"}]
+    monkeypatch.setattr(probes, "debug_enabled", lambda: True)
+    entry = await _setup(hass, fake)
+    diag = await async_get_config_entry_diagnostics(hass, entry)
+    serialized = json.dumps(diag, default=str)
+    for value in [*seeds.values(), "seed-threat-user", "seed-threat-url"]:
+        assert value not in serialized
+    raw = diag["raw_command_samples"]
+    assert "**REDACTED**" in raw["gp_current"]["xml"]
+    assert "**REDACTED**" in raw["gp_previous"]["xml"]
+    assert "**REDACTED**" in raw["threat_log"]["entries"][0]
