@@ -965,10 +965,24 @@ def _json_result(result: ET.Element) -> Any:
         raise ValueError(f"Invalid JSON in response: {err}") from err
 
 
+def _json_object(value: Any) -> dict[str, Any]:
+    """Require a JSON object before accessing its fields."""
+    if not isinstance(value, dict):
+        raise ValueError("Expected a JSON object")
+    return value
+
+
+def _json_objects(value: Any) -> list[dict[str, Any]]:
+    """Require a list of JSON objects before iterating over records."""
+    if not isinstance(value, list) or any(not isinstance(item, dict) for item in value):
+        raise ValueError("Expected a list of JSON objects")
+    return value
+
+
 def parse_bgp_summary(result: ET.Element) -> dict[str, dict[str, Any]]:
     """{logical router: {enabled, router_id, local_as}}."""
     out = {}
-    for lr, info in (_json_result(result) or {}).items():
+    for lr, info in _json_object(_json_result(result)).items():
         if isinstance(info, dict):
             out[lr] = {
                 "enabled": str(info.get("enabled", "")).lower() in ("yes", "true"),
@@ -981,16 +995,16 @@ def parse_bgp_summary(result: ET.Element) -> dict[str, dict[str, Any]]:
 def parse_bgp_peers(result: ET.Element) -> dict[str, dict[str, Any]]:
     """Per-logical-router 'bgp peer status' -> {peer name: {...}}."""
     peers: dict[str, dict[str, Any]] = {}
-    for name, p in (_json_result(result) or {}).items():
+    for name, p in _json_object(_json_result(result)).items():
         if not isinstance(p, dict) or "state" not in p:
             continue
-        detail = p.get("detail") or {}
+        detail = _json_object(p.get("detail", {}))
         prefixes = {
             afi: {
                 "accepted": info.get("acceptedPrefixCounter"),
                 "sent": info.get("sentPrefixCounter"),
             }
-            for afi, info in (detail.get("addressFamilyInfo") or {}).items()
+            for afi, info in _json_object(detail.get("addressFamilyInfo", {})).items()
             if isinstance(info, dict)
         }
         status_time = p.get("status-time")
@@ -1343,15 +1357,20 @@ def parse_default_routes(result: ET.Element) -> dict[str, dict[str, Any]]:
     raw = result.findtext("json")
     if raw is None:
         raise ValueError("No route table in response")
-    table = json.loads(raw) if raw.strip() else {}
+    table = _json_object(json.loads(raw) if raw.strip() else {})
     out: dict[str, dict[str, Any]] = {}
     for lr, prefixes in table.items():
+        prefixes = _json_object(prefixes)
         for prefix, family in (("0.0.0.0/0", "ipv4"), ("::/0", "ipv6")):
-            selected = next((r for r in prefixes.get(prefix) or [] if r.get("selected")), None)
+            routes = _json_objects(prefixes.get(prefix, []))
+            selected = next((r for r in routes if r.get("selected")), None)
             if selected is None:
                 continue
-            hops = selected.get("nexthops") or []
+            hops = _json_objects(selected.get("nexthops", []))
             hop = next((n for n in hops if n.get("active")), hops[0] if hops else {})
+            uptime = selected.get("uptime")
+            if uptime is not None and not isinstance(uptime, str):
+                raise ValueError("Expected route uptime to be a string")
             out.setdefault(lr, {})[family] = {
                 "protocol": selected.get("protocol"),
                 "distance": selected.get("distance"),

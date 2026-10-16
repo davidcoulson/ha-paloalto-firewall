@@ -1944,3 +1944,30 @@ async def test_status_rejects_different_serial(hass: HomeAssistant, fake) -> Non
     assert coordinator.data is previous
     assert hass.states.get("sensor.fw1_active_sessions").state == "unavailable"
     assert fake.calls == [("fw1.lan", const.CMD_SYSTEM_INFO)]
+
+
+@pytest.mark.parametrize("command, payload, source", [
+    (const.CMD_BGP_SUMMARY, "[1]", "bgp"),
+    (const.CMD_BGP_PEERS_LR.format("core-vr"), '{"peer":{"state":"Established","detail":1}}', "peers"),
+    (const.CMD_ROUTES.format("ipv4"), '{"core-vr":null}', "routes"),
+])
+async def test_malformed_network_json_is_isolated(hass: HomeAssistant, fake, monkeypatch, command, payload, source) -> None:
+    original = fake.respond
+
+    def respond(host, cmd, *args, **kwargs):
+        if cmd == command:
+            return f'<response status="success"><result><json>{payload}</json></result></response>', 200
+        return original(host, cmd, *args, **kwargs)
+
+    monkeypatch.setattr(fake, "respond", respond)
+    entry = await _setup(hass, fake)
+    network = entry.runtime_data.network
+    assert network.last_update_success
+    assert network.data["interfaces"]
+    assert network.data["egress"]
+    if source == "bgp":
+        assert not network._slow["bgp_ok"]
+    elif source == "peers":
+        assert not network.data["bgp"]["core-vr"]["ok"]
+    else:
+        assert not network.data["sources_ok"]["default_routes"]
