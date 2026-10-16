@@ -20,7 +20,14 @@ from homeassistant.util import dt as dt_util
 from .const import CERT_WARN_DAYS, DOMAIN, lr_identifier
 from .coordinator import PanOSConfigEntry
 from .entity import PanOSNetworkEntity, PanOSPairEntity, PanOSUnitEntity, PanOSUpdatesEntity
-from .network import lr_device_info, migrate_unique_id, name_key, pm_key_suffix, safe_key
+from .network import (
+    lr_device_info,
+    migrate_network_unique_ids,
+    migrate_unique_id,
+    name_key,
+    pm_key_suffix,
+    safe_key,
+)
 from .parsers import certs_expiring
 
 Data = dict[str, Any]
@@ -214,6 +221,7 @@ def network_binary_sensors(entry: PanOSConfigEntry) -> list[BinarySensorEntity]:
     if network is None or network.data is None:
         return []
     data = network.data
+    migrate_network_unique_ids(entry)
     entities: list[BinarySensorEntity] = [PanOSPendingChangesSensor(entry)]
     if data.get("certificates") is not None:
         entities.append(PanOSCertExpiringSensor(entry))
@@ -369,7 +377,7 @@ class PanOSBgpPeerSensor(PanOSNetworkEntity, BinarySensorEntity):
     _attr_device_class = BinarySensorDeviceClass.CONNECTIVITY
 
     def __init__(self, entry: PanOSConfigEntry, lr: str, peer: str, device) -> None:
-        super().__init__(entry, f"bgp_{safe_key(lr)}_{safe_key(peer)}", device)
+        super().__init__(entry, f"bgp_{name_key(lr, peer)}", device)
         self._lr = lr
         self._peer = peer
         self._attr_name = f"BGP {peer}"

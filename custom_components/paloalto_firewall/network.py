@@ -134,7 +134,7 @@ def source_interface(interfaces: dict[str, dict[str, Any]], address: str) -> dic
 
 def pm_key_suffix(key: str) -> str:
     """Unique-id suffix for a path-monitor group key."""
-    return key.replace("|", "_").replace("/", "_").replace(".", "_").replace(":", "_")
+    return name_key(key)
 
 
 def safe_key(value: str) -> str:
@@ -179,8 +179,10 @@ def migrate_unique_id(
     if not (entity_id := registry.async_get_entity_id(domain, DOMAIN, old)):
         return
     entity = registry.async_get(entity_id)
-    if original_name is not None and entity and entity.original_name not in (None, original_name):
-        return
+    if original_name is not None and entity:
+        allowed_names = (original_name,) if device_identifier else (None, original_name)
+        if entity.original_name not in allowed_names:
+            return
     if device_identifier is not None:
         # Only move it if it belongs to the device it's being migrated for.
         from homeassistant.helpers import device_registry as dr
@@ -189,6 +191,29 @@ def migrate_unique_id(
         if device is None or device_identifier not in device.identifiers:
             return
     registry.async_update_entity(entity_id, new_unique_id=new)
+
+
+def migrate_network_unique_ids(entry: PanOSConfigEntry) -> None:
+    """Migrate lossy network ids only for a proven name and router device."""
+    network = entry.runtime_data.network
+    data = network.data or {}
+    prefix = entry.entry_id
+    for lr, info in data.get("bgp", {}).items():
+        for peer in info["peers"]:
+            migrate_unique_id(
+                network.hass, "binary_sensor",
+                f"{prefix}_bgp_{safe_key(lr)}_{safe_key(peer)}",
+                f"{prefix}_bgp_{name_key(lr, peer)}",
+                original_name=f"BGP {peer}",
+                device_identifier=(DOMAIN, lr_identifier(prefix, lr)),
+            )
+    for key, group in data.get("path_groups", {}).items():
+        old = key.replace("|", "_").replace("/", "_").replace(".", "_").replace(":", "_")
+        migrate_unique_id(
+            network.hass, "binary_sensor", f"{prefix}_pm_{old}", f"{prefix}_pm_{pm_key_suffix(key)}",
+            original_name=f"Path monitor {group['interface']} via {group['nexthop']}",
+            device_identifier=(DOMAIN, lr_identifier(prefix, group["logical_router"])),
+        )
 
 
 def logical_routers(data: dict[str, Any]) -> list[str]:

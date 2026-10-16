@@ -1701,3 +1701,57 @@ async def test_diagnostics_redacts_raw_identities(hass: HomeAssistant, fake, mon
     assert "**REDACTED**" in raw["gp_current"]["xml"]
     assert "**REDACTED**" in raw["gp_previous"]["xml"]
     assert "**REDACTED**" in raw["threat_log"]["entries"][0]
+
+
+async def test_network_name_ids_and_safe_migration(hass: HomeAssistant, fake) -> None:
+    from homeassistant.helpers import entity_registry as er
+
+    from custom_components.paloalto_firewall import _remove_stale_network_entities
+    from custom_components.paloalto_firewall.binary_sensor import network_binary_sensors
+    from custom_components.paloalto_firewall.const import lr_identifier
+    from custom_components.paloalto_firewall.network import name_key, pm_key_suffix
+
+    entry = await _setup(hass, fake)
+    network = entry.runtime_data.network
+    reg = er.async_get(hass)
+    peers = network.data["bgp"]["core-vr"]["peers"]
+    peers["isp-a"] = next(iter(peers.values()))
+    peers["isp_a"] = peers["isp-a"]
+    group = next(iter(network.data["path_groups"].values()))
+    network.data["path_groups"]["isp.a|eth|hop"] = group
+    network.data["path_groups"]["isp_a|eth|hop"] = group
+    entities = network_binary_sensors(entry)
+    assert len({e.unique_id for e in entities}) == len(entities)
+    assert pm_key_suffix("isp.a|eth|hop") != pm_key_suffix("isp_a|eth|hop")
+
+    from homeassistant.helpers import device_registry as dr
+
+    device = get_device(dr.async_get(hass), (DOMAIN, lr_identifier(entry.entry_id, "core-vr")), entry.entry_id)
+    old_uid = f"{entry.entry_id}_bgp_core_vr_isp_a"
+    old = reg.async_get_or_create(
+        "binary_sensor", DOMAIN, old_uid, config_entry=entry,
+        device_id=device.id, original_name="BGP isp_a",
+    )
+    network_binary_sensors(entry)
+    assert reg.async_get(old.entity_id).unique_id == f"{entry.entry_id}_bgp_{name_key('core-vr', 'isp_a')}"
+    _remove_stale_network_entities(hass, entry)
+    assert reg.async_get(old.entity_id) is not None
+
+    # Path-monitor migration also runs before stale cleanup and retains entity_id.
+    pm = next(e for e in er.async_entries_for_config_entry(reg, entry.entry_id)
+              if e.unique_id.startswith(f"{entry.entry_id}_pm_"))
+    key = next(k for k in network.data["path_groups"] if pm.unique_id.endswith(pm_key_suffix(k)))
+    legacy = key.replace("|", "_").replace("/", "_").replace(".", "_").replace(":", "_")
+    reg.async_update_entity(pm.entity_id, new_unique_id=f"{entry.entry_id}_pm_{legacy}")
+    _remove_stale_network_entities(hass, entry)
+    assert reg.async_get(pm.entity_id).unique_id == pm.unique_id
+
+    # A matching slug on another router, or without the original name, is not proof.
+    reg.async_remove(old.entity_id)
+    for original_name, device_id in (("BGP isp-a", None), (None, device.id)):
+        other = reg.async_get_or_create(
+            "binary_sensor", DOMAIN, old_uid, device_id=device_id, original_name=original_name,
+        )
+        network_binary_sensors(entry)
+        assert reg.async_get(other.entity_id).unique_id == old_uid
+        reg.async_remove(other.entity_id)

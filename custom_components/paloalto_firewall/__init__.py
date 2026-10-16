@@ -54,6 +54,8 @@ from .network import (
     LR_DEVICE_FIELDS,
     PanOSNetworkCoordinator,
     cert_uid_suffix,
+    migrate_network_unique_ids,
+    name_key,
     pm_key_suffix,
     safe_key,
 )
@@ -265,6 +267,7 @@ def _remove_stale_network_entities(hass: HomeAssistant, entry: PanOSConfigEntry)
     network = entry.runtime_data.network
     if network.data is None:
         return
+    migrate_network_unique_ids(entry)
     data = network.data
     ok = data.get("sources_ok", {})
     # Interface entities: exact ids, and only prune auto-selected interfaces
@@ -287,7 +290,7 @@ def _remove_stale_network_entities(hass: HomeAssistant, entry: PanOSConfigEntry)
     bgp_prefix = f"{entry.entry_id}_bgp_"
     bgp_keep = {f"{bgp_prefix}{lr}_established" for lr in data.get("bgp", {})}
     bgp_keep |= {
-        f"{bgp_prefix}{safe_key(lr)}_{safe_key(peer)}"
+        f"{bgp_prefix}{name_key(lr, peer)}"
         for lr, info in data.get("bgp", {}).items()
         if info["ok"]
         for peer in info["peers"]
