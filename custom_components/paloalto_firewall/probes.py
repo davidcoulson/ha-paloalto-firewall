@@ -33,8 +33,15 @@ from .const import (
 _LOGGER = logging.getLogger(__package__)
 MAX_CHARS = 25000
 REDACT_XML_FIELDS = {
-    "username", "primary-username", "computer", "public-ip", "public-ipv6",
-    "virtual-ip", "virtual-ipv6", "srcuser", "misc",
+    "username",
+    "primary-username",
+    "computer",
+    "public-ip",
+    "public-ipv6",
+    "virtual-ip",
+    "virtual-ipv6",
+    "srcuser",
+    "misc",
 }
 
 STATIC_PROBES: dict[str, str] = {

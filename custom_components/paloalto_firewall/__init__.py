@@ -81,9 +81,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: PanOSConfigEntry) -> boo
         raise
 
 
-async def _async_setup_entry(
-    hass: HomeAssistant, entry: PanOSConfigEntry, units: list[PanOSUnit]
-) -> bool:
+async def _async_setup_entry(hass: HomeAssistant, entry: PanOSConfigEntry, units: list[PanOSUnit]) -> bool:
     session = async_get_clientsession(hass, verify_ssl=entry.data[CONF_VERIFY_SSL])
     scan = timedelta(seconds=entry.options.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL))
     update_every = timedelta(hours=entry.options.get(CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL))

@@ -187,17 +187,20 @@ def test_gp_session_bad_timestamps():
     assert s["login_time"] is None
 
 
-@pytest.mark.parametrize("parser, payload", [
-    (parsers.parse_bgp_summary, "[1]"),
-    (parsers.parse_bgp_peers, "[1]"),
-    (parsers.parse_bgp_peers, '{"peer":{"state":"Established","detail":1}}'),
-    (parsers.parse_bgp_peers, '{"peer":{"state":"Established","detail":{"addressFamilyInfo":1}}}'),
-    (parsers.parse_default_routes, "[1]"),
-    (parsers.parse_default_routes, '{"core-vr":null}'),
-    (parsers.parse_default_routes, '{"core-vr":{"0.0.0.0/0":[1]}}'),
-    (parsers.parse_default_routes, '{"core-vr":{"0.0.0.0/0":[{"selected":true,"nexthops":[1]}]}}'),
-    (parsers.parse_default_routes, '{"core-vr":{"0.0.0.0/0":[{"selected":true,"uptime":1}]}}'),
-])
+@pytest.mark.parametrize(
+    "parser, payload",
+    [
+        (parsers.parse_bgp_summary, "[1]"),
+        (parsers.parse_bgp_peers, "[1]"),
+        (parsers.parse_bgp_peers, '{"peer":{"state":"Established","detail":1}}'),
+        (parsers.parse_bgp_peers, '{"peer":{"state":"Established","detail":{"addressFamilyInfo":1}}}'),
+        (parsers.parse_default_routes, "[1]"),
+        (parsers.parse_default_routes, '{"core-vr":null}'),
+        (parsers.parse_default_routes, '{"core-vr":{"0.0.0.0/0":[1]}}'),
+        (parsers.parse_default_routes, '{"core-vr":{"0.0.0.0/0":[{"selected":true,"nexthops":[1]}]}}'),
+        (parsers.parse_default_routes, '{"core-vr":{"0.0.0.0/0":[{"selected":true,"uptime":1}]}}'),
+    ],
+)
 def test_malformed_optional_json_raises_value_error(parser, payload):
     with pytest.raises(ValueError):
         parser(parse_response(fakefw.OK.format(f"<json>{payload}</json>")))

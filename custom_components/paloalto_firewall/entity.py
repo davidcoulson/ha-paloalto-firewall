@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from functools import partial
 from typing import Any
 
@@ -117,7 +117,7 @@ class PanOSNetworkEntity(CoordinatorEntity[PanOSNetworkCoordinator]):
 def track_unit_entities(
     entry: PanOSConfigEntry,
     async_add_entities: AddConfigEntryEntitiesCallback,
-    build: Callable[[PanOSUnit], list[Entity]],
+    build: Callable[[PanOSUnit], Sequence[Entity]],
 ) -> None:
     """Discover optional entities after recovery; keep one of each until unload."""
     added: set[str] = set()

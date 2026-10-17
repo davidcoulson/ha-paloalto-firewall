@@ -17,7 +17,9 @@ async def test_api_rejects_redirects(status, keygen) -> None:
     )
     session = MagicMock()
     session.post.return_value.__aenter__.return_value = response
-    client = PanOSClient(session, "fw.example", "seed-user", "seed-password", api_key=None if keygen else "key")
+    client = PanOSClient(
+        session, "fw.example", "seed-user", "seed-password", api_key=None if keygen else "key"
+    )
     with pytest.raises(PanOSConnectionError, match=f"HTTP {status} redirect.*redirects are disabled"):
         if keygen:
             await client.generate_key()

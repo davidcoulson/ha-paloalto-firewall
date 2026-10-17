@@ -201,7 +201,8 @@ def migrate_network_unique_ids(entry: PanOSConfigEntry) -> None:
     for lr, info in data.get("bgp", {}).items():
         for peer in info["peers"]:
             migrate_unique_id(
-                network.hass, "binary_sensor",
+                network.hass,
+                "binary_sensor",
                 f"{prefix}_bgp_{safe_key(lr)}_{safe_key(peer)}",
                 f"{prefix}_bgp_{name_key(lr, peer)}",
                 original_name=f"BGP {peer}",
@@ -210,7 +211,10 @@ def migrate_network_unique_ids(entry: PanOSConfigEntry) -> None:
     for key, group in data.get("path_groups", {}).items():
         old = key.replace("|", "_").replace("/", "_").replace(".", "_").replace(":", "_")
         migrate_unique_id(
-            network.hass, "binary_sensor", f"{prefix}_pm_{old}", f"{prefix}_pm_{pm_key_suffix(key)}",
+            network.hass,
+            "binary_sensor",
+            f"{prefix}_pm_{old}",
+            f"{prefix}_pm_{pm_key_suffix(key)}",
             original_name=f"Path monitor {group['interface']} via {group['nexthop']}",
             device_identifier=(DOMAIN, lr_identifier(prefix, group["logical_router"])),
         )
@@ -400,9 +404,9 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         if unit_changed or self._slow_at is None or now - self._slow_at >= self.slow_interval:
             await self._refresh_slow(unit, interfaces)
             self._slow_at = now
-        data.update({
-            k: v for k, v in self._slow.items() if k not in ("unit_serial", "bgp_ok", "certs_device_ok")
-        })
+        data.update(
+            {k: v for k, v in self._slow.items() if k not in ("unit_serial", "bgp_ok", "certs_device_ok")}
+        )
         data["gp_users"] = (
             self._gp_users(gp_current, data.get("gp_previous")) if gp_current is not None else None
         )

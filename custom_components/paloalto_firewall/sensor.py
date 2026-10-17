@@ -340,9 +340,13 @@ async def async_setup_entry(
     paired = runtime.pair is not None
     entities: list[SensorEntity] = []
     track_unit_entities(
-        entry, async_add_entities,
-        lambda unit: [PanOSUnitSensor(entry, unit, desc) for desc in UNIT_SENSORS
-                      if desc.exists_fn(unit.coordinator.data, paired)],
+        entry,
+        async_add_entities,
+        lambda unit: [
+            PanOSUnitSensor(entry, unit, desc)
+            for desc in UNIT_SENSORS
+            if desc.exists_fn(unit.coordinator.data, paired)
+        ],
     )
     for unit in runtime.units:
         entities.append(PanOSLicenseSensor(entry, unit, LICENSE_SENSOR))
