@@ -523,7 +523,6 @@ async def test_prefix_pools_and_npt_mismatch(hass: HomeAssistant, fake, freezer)
     assert bad.state == "on"
     assert bad.attributes["problems"] == [
         "NPT: outbound uses 2001:db8:aaa:f0::/60, outside delegated 2001:db8:a00::/56",
-        "NPT (#2): inbound uses 2001:db8:aaa:f0::/60, outside delegated 2001:db8:a00::/56",
     ]
     assert st("binary_sensor.edge_ha_pair_wan_b_nptv6_prefix_mismatch").state == "off"
 
@@ -1547,3 +1546,518 @@ async def test_repeated_full_reads_do_not_extend_the_cap(
     for _ in range(3):  # each later read returns 2 already-known entries: no gap
         await _tick(hass, freezer, 61)
     assert hass.states.get("sensor.edge_ha_pair_threats_24h").attributes["count_capped"] is False
+
+
+async def test_network_cache_expires_and_recovers(hass: HomeAssistant, fake, freezer) -> None:
+    entry = await _setup(hass, fake)
+    network = entry.runtime_data.network
+    link = "binary_sensor.edge_ha_pair_ethernet1_1_link"
+    for unit in fake.units.values():
+        unit["up"] = False
+    await _tick(hass, freezer, 61)
+    assert network.last_update_success
+    assert hass.states.get(link).state == "on"
+    assert network.data["gp_current"] is None
+    assert network.data["gp_users"] is None
+    await _tick(hass, freezer, int(network.freshness_grace.total_seconds()) + 1)
+    assert not network.last_update_success
+    assert hass.states.get(link).state == "unavailable"
+    fake.units["fw1.lan"]["up"] = True
+    await _tick(hass, freezer, 61)
+    assert network.last_update_success
+    assert hass.states.get(link).state == "on"
+
+
+async def test_network_ignores_stale_successful_gp_status(hass: HomeAssistant, fake, freezer) -> None:
+    entry = await _setup(hass, fake)
+    network = entry.runtime_data.network
+    assert network.data["gp_current"]
+    freezer.tick(network.freshness_grace + timedelta(seconds=1))
+    await network.async_refresh()
+    assert network.last_update_success
+    assert network.data["gp_current"] is None
+    assert network.data["gp_users"] is None
+
+
+@pytest.mark.parametrize("poll", ["status", "updates", "network", "slow_network"])
+async def test_poll_failure_cancels_and_awaits_siblings(hass: HomeAssistant, fake, monkeypatch, poll) -> None:
+    from homeassistant.exceptions import ConfigEntryAuthFailed
+
+    entry = await _setup(hass, fake)
+    runtime = entry.runtime_data
+    coordinator = {
+        "status": runtime.units[0].coordinator,
+        "updates": runtime.units[0].updates,
+        "network": runtime.network,
+        "slow_network": runtime.network,
+    }[poll]
+    started = asyncio.Event()
+    calls = []
+    finished = []
+
+    async def read(*args, **kwargs):
+        index = len(calls)
+        calls.append(index)
+        if index == 0:
+            await started.wait()
+            raise ConfigEntryAuthFailed("expired credentials")
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            await asyncio.sleep(0)
+            finished.append(index)
+
+    monkeypatch.setattr(coordinator, "_optional", read)
+    with pytest.raises(ConfigEntryAuthFailed, match="expired credentials"):
+        if poll == "slow_network":
+            await coordinator._refresh_slow(runtime.units[0], runtime.network.data["interfaces"])
+        else:
+            await coordinator._async_update_data()
+    assert len(calls) > 1
+    assert sorted(finished) == calls[1:]
+
+
+async def test_unload_closes_clients_and_cancels_reads(hass: HomeAssistant, fake) -> None:
+    from custom_components.paloalto_firewall.const import CMD_INTERFACE_ALL
+
+    entry = await _setup(hass, fake)
+    units = entry.runtime_data.units
+    fake.hold = asyncio.Event()
+    fake.hold_cmd = CMD_INTERFACE_ALL
+    task = asyncio.create_task(units[0].client.op(CMD_INTERFACE_ALL))
+    while not fake.held:
+        await asyncio.sleep(0)
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert all(u.client._closed and not u.client._inflight for u in units)
+
+
+@pytest.mark.parametrize("failure", ["status", "platforms"])
+async def test_failed_setup_closes_clients(hass: HomeAssistant, fake, monkeypatch, failure) -> None:
+    from unittest.mock import AsyncMock
+
+    from custom_components.paloalto_firewall.api import PanOSClient
+
+    clients = []
+    original_init = PanOSClient.__init__
+
+    def init(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        clients.append(self)
+
+    monkeypatch.setattr(PanOSClient, "__init__", init)
+    if failure == "status":
+        fake.bad_password = True
+    else:
+        monkeypatch.setattr(
+            hass.config_entries, "async_forward_entry_setups", AsyncMock(side_effect=RuntimeError("failed"))
+        )
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_NAME: "Edge",
+            CONF_USERNAME: "u",
+            CONF_PASSWORD: "p",
+            CONF_VERIFY_SSL: False,
+            CONF_UNITS: [{"host": "fw1.lan", "serial": "0123456789001", "hostname": "fw1"}],
+        },
+    )
+    entry.add_to_hass(hass)
+    assert not await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert clients and all(c._closed and not c._inflight for c in clients)
+
+
+async def test_diagnostics_redacts_raw_identities(hass: HomeAssistant, fake, monkeypatch) -> None:
+    import json
+
+    from custom_components.paloalto_firewall import probes
+    from custom_components.paloalto_firewall.diagnostics import async_get_config_entry_diagnostics
+
+    seeds = {
+        "username": "seed-vpn-user",
+        "primary-username": "seed-primary-user",
+        "computer": "seed-vpn-computer",
+        "public-ip": "198.51.100.199",
+        "public-ipv6": "2001:db8::199",
+        "virtual-ip": "192.0.2.199",
+        "virtual-ipv6": "2001:db8:1::199",
+    }
+    original_respond = fake.respond
+
+    def respond(host, cmd, *args, **kwargs):
+        if cmd in (const.CMD_GP_USERS, const.CMD_GP_PREVIOUS):
+            fields = "".join(f"<{key}>{value}</{key}>" for key, value in seeds.items())
+            return f'<response status="success"><result><entry>{fields}</entry></result></response>', 200
+        return original_respond(host, cmd, *args, **kwargs)
+
+    monkeypatch.setattr(fake, "respond", respond)
+    for host in fake.units:
+        fake.threats[host] = [{"seqno": 1, "srcuser": "seed-threat-user", "misc": "seed-threat-url"}]
+    monkeypatch.setattr(probes, "debug_enabled", lambda: True)
+    entry = await _setup(hass, fake)
+    diag = await async_get_config_entry_diagnostics(hass, entry)
+    serialized = json.dumps(diag, default=str)
+    for value in [*seeds.values(), "seed-threat-user", "seed-threat-url"]:
+        assert value not in serialized
+    raw = diag["raw_command_samples"]
+    assert "**REDACTED**" in raw["gp_current"]["xml"]
+    assert "**REDACTED**" in raw["gp_previous"]["xml"]
+    assert "**REDACTED**" in raw["threat_log"]["entries"][0]
+
+
+async def test_network_name_ids_and_safe_migration(hass: HomeAssistant, fake) -> None:
+    from homeassistant.helpers import entity_registry as er
+
+    from custom_components.paloalto_firewall import _remove_stale_network_entities
+    from custom_components.paloalto_firewall.binary_sensor import network_binary_sensors
+    from custom_components.paloalto_firewall.const import lr_identifier
+    from custom_components.paloalto_firewall.network import name_key, pm_key_suffix
+
+    entry = await _setup(hass, fake)
+    network = entry.runtime_data.network
+    reg = er.async_get(hass)
+    peers = network.data["bgp"]["core-vr"]["peers"]
+    peers["isp-a"] = next(iter(peers.values()))
+    peers["isp_a"] = peers["isp-a"]
+    group = next(iter(network.data["path_groups"].values()))
+    network.data["path_groups"]["isp.a|eth|hop"] = group
+    network.data["path_groups"]["isp_a|eth|hop"] = group
+    entities = network_binary_sensors(entry)
+    assert len({e.unique_id for e in entities}) == len(entities)
+    assert pm_key_suffix("isp.a|eth|hop") != pm_key_suffix("isp_a|eth|hop")
+
+    from homeassistant.helpers import device_registry as dr
+
+    device = get_device(
+        dr.async_get(hass), (DOMAIN, lr_identifier(entry.entry_id, "core-vr")), entry.entry_id
+    )
+    old_uid = f"{entry.entry_id}_bgp_core_vr_isp_a"
+    old = reg.async_get_or_create(
+        "binary_sensor",
+        DOMAIN,
+        old_uid,
+        config_entry=entry,
+        device_id=device.id,
+        original_name="BGP isp_a",
+    )
+    network_binary_sensors(entry)
+    assert reg.async_get(old.entity_id).unique_id == f"{entry.entry_id}_bgp_{name_key('core-vr', 'isp_a')}"
+    _remove_stale_network_entities(hass, entry)
+    assert reg.async_get(old.entity_id) is not None
+
+    # Path-monitor migration also runs before stale cleanup and retains entity_id.
+    pm = next(
+        e
+        for e in er.async_entries_for_config_entry(reg, entry.entry_id)
+        if e.unique_id.startswith(f"{entry.entry_id}_pm_")
+    )
+    key = next(k for k in network.data["path_groups"] if pm.unique_id.endswith(pm_key_suffix(k)))
+    legacy = key.replace("|", "_").replace("/", "_").replace(".", "_").replace(":", "_")
+    reg.async_update_entity(pm.entity_id, new_unique_id=f"{entry.entry_id}_pm_{legacy}")
+    _remove_stale_network_entities(hass, entry)
+    assert reg.async_get(pm.entity_id).unique_id == pm.unique_id
+
+    # A matching slug on another router, or without the original name, is not proof.
+    reg.async_remove(old.entity_id)
+    for original_name, device_id in (("BGP isp-a", None), (None, device.id)):
+        other = reg.async_get_or_create(
+            "binary_sensor",
+            DOMAIN,
+            old_uid,
+            device_id=device_id,
+            original_name=original_name,
+        )
+        network_binary_sensors(entry)
+        assert reg.async_get(other.entity_id).unique_id == old_uid
+        reg.async_remove(other.entity_id)
+
+
+@pytest.mark.parametrize("days, expected", [(-1, True), (10, True), (60, False)])
+async def test_certificate_problem_includes_expired(hass: HomeAssistant, fake, days, expected) -> None:
+    from custom_components.paloalto_firewall.binary_sensor import PanOSCertExpiringSensor
+
+    entry = await _setup(hass, fake)
+    network = entry.runtime_data.network
+    network.data["certificates"]["store"] = [
+        {
+            "name": "only-cert",
+            "expires": (dt_util.utcnow() + timedelta(days=days)).isoformat(),
+        }
+    ]
+    sensor = PanOSCertExpiringSensor(entry)
+    assert sensor.is_on is expected
+    network.data["certificates"]["store"] = None
+    assert sensor.is_on is None
+    assert not sensor.available
+
+
+async def test_same_name_certificate_repairs_keep_full_identity(hass: HomeAssistant, fake) -> None:
+    from homeassistant.helpers import issue_registry as ir
+
+    from custom_components.paloalto_firewall.repairs import PanOSRepairs
+
+    entry = await _setup(hass, fake)
+    store = [
+        {
+            "name": "shared-cn",
+            "serial": serial,
+            "issuer": issuer,
+            "expires": (dt_util.utcnow() - timedelta(days=1)).isoformat(),
+        }
+        for serial, issuer in (("1", "ca-a"), ("2", "ca-a"), ("1", "ca-b"))
+    ]
+    entry.runtime_data.network.data["certificates"]["store"] = store
+    repairs = PanOSRepairs(hass, entry)
+    repairs.async_evaluate()
+    registry = ir.async_get(hass)
+
+    def cert_issues():
+        return {
+            k: v
+            for k, v in registry.issues.items()
+            if k[0] == DOMAIN and v.translation_key.startswith("certificate_")
+        }
+
+    before = cert_issues()
+    assert len(before) == 3
+    store.pop(0)
+    repairs.async_evaluate()
+    assert len(cert_issues()) == 2
+    assert set(cert_issues()) < set(before)
+
+
+async def test_optional_unit_entities_discovered_after_recovery(hass: HomeAssistant, fake) -> None:
+    from homeassistant.helpers import entity_registry as er
+
+    fake.fail = {cmd: "error" for cmd in (const.CMD_ENVIRONMENTALS, const.CMD_GP_USERS, const.CMD_IPSEC_SA)}
+    for unit in fake.units.values():
+        unit["gp"] = "0.0.0"
+    entry = await _setup(hass, fake)
+    suffixes = ("temperature", "globalprotect_users", "ipsec_tunnels", "hardware_alarm", "gp_client_update")
+    reg = er.async_get(hass)
+
+    def optional_ids():
+        return {
+            e.unique_id
+            for e in er.async_entries_for_config_entry(reg, entry.entry_id)
+            if any(
+                e.unique_id == f"{u.config.serial}_{s}" for u in entry.runtime_data.units for s in suffixes
+            )
+        }
+
+    assert optional_ids() == set()
+    fake.fail = {}
+    for unit in fake.units.values():
+        unit["gp"] = "6.3.3-c1046"
+    for unit in entry.runtime_data.units:
+        await unit.coordinator.async_refresh()
+    await hass.async_block_till_done(wait_background_tasks=True)
+    expected = {f"{u.config.serial}_{s}" for u in entry.runtime_data.units for s in suffixes}
+    assert optional_ids() == expected
+    for unit in entry.runtime_data.units:
+        await unit.coordinator.async_refresh()
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert optional_ids() == expected
+    coordinators = [u.coordinator for u in entry.runtime_data.units]
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    assert all(not c._listeners for c in coordinators)
+
+
+async def test_same_hostname_failover_uses_serial(hass: HomeAssistant, fake, monkeypatch) -> None:
+    from custom_components.paloalto_firewall import network as network_module
+    from custom_components.paloalto_firewall.services import _network_state
+
+    for unit in fake.units.values():
+        unit["hostname"] = "shared"
+    entry = await _setup(hass, fake)
+    network = entry.runtime_data.network
+    first, second = entry.runtime_data.units
+    assert network.data["unit_serial"] == first.config.serial
+    await network.async_refresh()
+    assert any(c["in_kbps"] is not None for c in network.data["counters"].values())
+
+    # Service lookups must read this unit's interfaces despite the equal hostname.
+    before = fake.calls.count((second.config.host, const.CMD_INTERFACE_ALL))
+    await _network_state(entry, second)
+    assert fake.calls.count((second.config.host, const.CMD_INTERFACE_ALL)) == before + 1
+    before = fake.calls.count((first.config.host, const.CMD_INTERFACE_ALL))
+    await _network_state(entry, first)
+    assert fake.calls.count((first.config.host, const.CMD_INTERFACE_ALL)) == before
+
+    events = async_capture_events(hass, "paloalto_firewall_bgp_peer_change")
+    fake.dns_bgp_up = False
+    monkeypatch.setattr(network_module, "pick_unit", lambda entry: second)
+    await network.async_refresh()
+    assert network.last_update_success
+    assert network.data["unit_serial"] == second.config.serial
+    assert events == []
+    assert all(c["in_kbps"] is None for c in network.data["counters"].values())
+    assert network._slow["unit_serial"] == second.config.serial
+
+
+@pytest.mark.parametrize("failed", ["interfaces", "live", "slow"])
+async def test_same_hostname_failover_does_not_reuse_other_unit_cache(
+    hass: HomeAssistant, fake, monkeypatch, failed
+) -> None:
+    from custom_components.paloalto_firewall import network as network_module
+
+    for unit in fake.units.values():
+        unit["hostname"] = "shared"
+    entry = await _setup(hass, fake)
+    network = entry.runtime_data.network
+    second = entry.runtime_data.units[1]
+    monkeypatch.setattr(network_module, "pick_unit", lambda entry: second)
+    if failed == "slow":
+        fake.fail = {const.CMD_BGP_SUMMARY: "error", const.CMD_PD_POOLS: "error"}
+    elif failed == "interfaces":
+        fake.fail = {const.CMD_INTERFACE_ALL: "error"}
+    else:
+        fake.fail = {
+            cmd: "error"
+            for cmd in (
+                const.CMD_INTERFACE_ALL,
+                const.CMD_FIB,
+                const.CMD_PATH_MONITOR,
+                const.CMD_ROUTES.format("ipv4"),
+                const.CMD_ROUTES.format("ipv6"),
+            )
+        }
+    await network.async_refresh()
+    if failed == "slow":
+        assert network.last_update_success
+        assert network.data["bgp"] == {}
+        assert network.data["prefix_pools"] == {}
+    else:
+        assert not network.last_update_success
+
+
+@pytest.mark.parametrize(
+    "stored, hosts",
+    [
+        (["fw1.lan"], ["fw1.lan", "fw2.lan"]),
+        (["fw1.lan", "fw2.lan"], ["fw2.lan"]),
+        (["fw1.lan", "fw2.lan"], ["fw2.lan", "fw1.lan"]),
+        (["fw2.lan"], ["fw1.lan", "fw2.lan"]),
+    ],
+)
+async def test_config_flow_rejects_overlapping_serials(hass: HomeAssistant, fake, stored, hosts) -> None:
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_UNITS: [{"serial": fake.units[h]["serial"]} for h in stored]},
+    )
+    entry.add_to_hass(hass)
+    result = await hass.config_entries.flow.async_init(DOMAIN, context={"source": config_entries.SOURCE_USER})
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"],
+        {**USER_INPUT, CONF_PRIMARY_HOST: hosts[0], CONF_SECONDARY_HOST: hosts[1] if len(hosts) > 1 else ""},
+    )
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "already_configured"
+
+
+@pytest.mark.parametrize("changed_host", ["fw1.lan", "fw2.lan"])
+async def test_reauth_rejects_different_serial(hass: HomeAssistant, fake, changed_host) -> None:
+    entry = await _setup(hass, fake)
+    fake.units[changed_host]["serial"] = "replacement"
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={"source": config_entries.SOURCE_REAUTH, "entry_id": entry.entry_id},
+        data=entry.data,
+    )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_USERNAME: "new-user", CONF_PASSWORD: "new-password"}
+    )
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "serial_mismatch"
+    assert entry.data[CONF_USERNAME] == "u"
+    assert entry.data[CONF_PASSWORD] == "p"
+
+
+async def test_status_rejects_different_serial(hass: HomeAssistant, fake) -> None:
+    entry = await _setup(hass, fake)
+    coordinator = entry.runtime_data.units[0].coordinator
+    previous = coordinator.data
+    fake.units["fw1.lan"]["serial"] = "replacement"
+    fake.calls.clear()
+    await coordinator.async_refresh()
+    assert not coordinator.last_update_success
+    assert "serial replacement does not match configured" in str(coordinator.last_exception)
+    assert coordinator.data is previous
+    assert hass.states.get("sensor.fw1_active_sessions").state == "unavailable"
+    assert fake.calls == [("fw1.lan", const.CMD_SYSTEM_INFO)]
+
+
+@pytest.mark.parametrize(
+    "command, payload, source",
+    [
+        (const.CMD_BGP_SUMMARY, "[1]", "bgp"),
+        (const.CMD_BGP_PEERS_LR.format("core-vr"), '{"peer":{"state":"Established","detail":1}}', "peers"),
+        (const.CMD_ROUTES.format("ipv4"), '{"core-vr":null}', "routes"),
+    ],
+)
+async def test_malformed_network_json_is_isolated(
+    hass: HomeAssistant, fake, monkeypatch, command, payload, source
+) -> None:
+    original = fake.respond
+
+    def respond(host, cmd, *args, **kwargs):
+        if cmd == command:
+            return f'<response status="success"><result><json>{payload}</json></result></response>', 200
+        return original(host, cmd, *args, **kwargs)
+
+    monkeypatch.setattr(fake, "respond", respond)
+    entry = await _setup(hass, fake)
+    network = entry.runtime_data.network
+    assert network.last_update_success
+    assert network.data["interfaces"]
+    assert network.data["egress"]
+    if source == "bgp":
+        assert not network._slow["bgp_ok"]
+    elif source == "peers":
+        assert not network.data["bgp"]["core-vr"]["ok"]
+    else:
+        assert not network.data["sources_ok"]["default_routes"]
+
+
+async def test_fib_parsing_and_egress_share_executor_job(hass: HomeAssistant, fake, monkeypatch) -> None:
+    import threading
+
+    from custom_components.paloalto_firewall import network as network_module
+
+    entry = await _setup(hass, fake)
+    network = entry.runtime_data.network
+    original_parse = network_module.parsers.parse_fib
+    original_lookup = network_module.parsers.fib_lookup
+    main_thread = threading.get_ident()
+    threads = []
+    jobs = []
+    original_job = hass.async_add_executor_job
+
+    def parse(result):
+        threads.append(threading.get_ident())
+        return original_parse(result)
+
+    def lookup(*args):
+        threads.append(threading.get_ident())
+        return original_lookup(*args)
+
+    def job(target, *args):
+        if target is network_module._fib_and_egress:
+            jobs.append(target)
+        return original_job(target, *args)
+
+    monkeypatch.setattr(network_module.parsers, "parse_fib", parse)
+    monkeypatch.setattr(network_module.parsers, "fib_lookup", lookup)
+    monkeypatch.setattr(hass, "async_add_executor_job", job)
+    previous_fib, previous_egress = network.data["fib"], network.data["egress"]
+    await network.async_refresh()
+    assert network.last_update_success
+    assert network.data["fib"] == previous_fib
+    assert network.data["egress"] == previous_egress
+    assert len(jobs) == 1
+    assert len(threads) > 1
+    assert len(set(threads)) == 1
+    assert threads[0] != main_thread

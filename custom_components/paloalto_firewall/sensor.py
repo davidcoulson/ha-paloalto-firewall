@@ -24,7 +24,13 @@ from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN
 from .coordinator import PanOSConfigEntry
-from .entity import PanOSNetworkEntity, PanOSPairEntity, PanOSUnitEntity, PanOSUpdatesEntity
+from .entity import (
+    PanOSNetworkEntity,
+    PanOSPairEntity,
+    PanOSUnitEntity,
+    PanOSUpdatesEntity,
+    track_unit_entities,
+)
 from .network import cert_uid_suffix, lr_device_info, migrate_unique_id, parent_identifier, safe_key
 from .parsers import HA_STATES
 from .threats import PanOSThreatCoordinator
@@ -50,7 +56,7 @@ def _ha_enabled(data: Data | None) -> bool:
 class PanOSSensorDescription(SensorEntityDescription):
     value_fn: Callable[[Data], Any]
     attrs_fn: Callable[[Data], dict[str, Any]] | None = None
-    # (first data or None, unit is part of a configured pair) -> create?
+    # (latest data or None, unit is part of a configured pair) -> create?
     exists_fn: Callable[[Data | None, bool], bool] = lambda data, paired: True
     # Also expose on the HA-pair device, following the active unit.
     on_pair: bool = False
@@ -77,7 +83,7 @@ def _ha_exists(data: Data | None, paired: bool) -> bool:
 
 
 def _section_exists(section: str) -> Callable[[Data | None, bool], bool]:
-    # Create when the section answered at setup, or when we couldn't tell.
+    # Create when the section answers, or when we cannot tell yet.
     return lambda data, paired: data is None or data.get(section) is not None
 
 
@@ -333,11 +339,16 @@ async def async_setup_entry(
     runtime = entry.runtime_data
     paired = runtime.pair is not None
     entities: list[SensorEntity] = []
+    track_unit_entities(
+        entry,
+        async_add_entities,
+        lambda unit: [
+            PanOSUnitSensor(entry, unit, desc)
+            for desc in UNIT_SENSORS
+            if desc.exists_fn(unit.coordinator.data, paired)
+        ],
+    )
     for unit in runtime.units:
-        first = unit.coordinator.data
-        entities.extend(
-            PanOSUnitSensor(entry, unit, desc) for desc in UNIT_SENSORS if desc.exists_fn(first, paired)
-        )
         entities.append(PanOSLicenseSensor(entry, unit, LICENSE_SENSOR))
     if runtime.pair:
         entities.append(PanOSActiveUnitSensor(entry, runtime.pair, PAIR_ACTIVE_SENSOR))

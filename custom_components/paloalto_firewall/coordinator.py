@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -19,6 +18,7 @@ from homeassistant.util import dt as dt_util
 
 from . import parsers
 from .api import PanOSAuthError, PanOSClient, PanOSError
+from .async_utils import gather_reads
 from .const import (
     CMD_ADMINS,
     CMD_CONTENT_CHECK,
@@ -154,12 +154,8 @@ class PanOSDeviceCoordinator(_BaseCoordinator):
             raise UpdateFailed(f"{self.unit.host}: {err}") from err
 
         if system["serial"] != self.unit.serial:
-            _LOGGER.warning(
-                "%s now reports serial %s but was configured as %s; is the "
-                "management address pointing at the right firewall?",
-                self.unit.host,
-                system["serial"],
-                self.unit.serial,
+            raise UpdateFailed(
+                f"{self.unit.host}: serial {system['serial']} does not match configured {self.unit.serial}"
             )
 
         optional = {
@@ -172,7 +168,7 @@ class PanOSDeviceCoordinator(_BaseCoordinator):
             "admins": (CMD_ADMINS, parsers.parse_admins),
             "ipsec": (CMD_IPSEC_SA, parsers.parse_ipsec_sa),
         }
-        results = await asyncio.gather(*(self._optional(k, cmd, fn) for k, (cmd, fn) in optional.items()))
+        results = await gather_reads(*(self._optional(k, cmd, fn) for k, (cmd, fn) in optional.items()))
         data: dict[str, Any] = {"system": system, **dict(zip(optional, results, strict=True))}
         data["boot_time"] = self._stable_boot_time(system.get("uptime_seconds"))
         # When the firewall's clock was read, for working out its UTC offset later.
@@ -212,7 +208,7 @@ class PanOSUpdatesCoordinator(_BaseCoordinator):
         super().__init__(hass, entry, client, unit, "updates", interval)
 
     async def _async_update_data(self) -> dict[str, Any]:
-        software, content, licenses, gp_client = await asyncio.gather(
+        software, content, licenses, gp_client = await gather_reads(
             self._optional(
                 "software", CMD_SOFTWARE_CHECK, parsers.parse_software_check, UPDATE_CHECK_TIMEOUT
             ),

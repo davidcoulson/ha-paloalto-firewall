@@ -36,7 +36,8 @@
     },
     "abort": {
       "already_configured": "This firewall or pair is already configured.",
-      "reauth_successful": "Re-authentication was successful."
+      "reauth_successful": "Re-authentication was successful.",
+      "serial_mismatch": "The management address reports a different firewall serial number."
     }
   },
   "options": {

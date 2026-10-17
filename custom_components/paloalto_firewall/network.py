@@ -6,7 +6,6 @@ from whichever firewall is active (or the only firewall, when standalone).
 
 from __future__ import annotations
 
-import asyncio
 import ipaddress
 import logging
 import time
@@ -22,6 +21,7 @@ from homeassistant.util import dt as dt_util
 
 from . import parsers
 from .api import PanOSAuthError, PanOSError
+from .async_utils import gather_reads
 from .const import (
     CMD_BGP_PEERS_LR,
     CMD_BGP_SUMMARY,
@@ -134,7 +134,7 @@ def source_interface(interfaces: dict[str, dict[str, Any]], address: str) -> dic
 
 def pm_key_suffix(key: str) -> str:
     """Unique-id suffix for a path-monitor group key."""
-    return key.replace("|", "_").replace("/", "_").replace(".", "_").replace(":", "_")
+    return name_key(key)
 
 
 def safe_key(value: str) -> str:
@@ -179,8 +179,10 @@ def migrate_unique_id(
     if not (entity_id := registry.async_get_entity_id(domain, DOMAIN, old)):
         return
     entity = registry.async_get(entity_id)
-    if original_name is not None and entity and entity.original_name not in (None, original_name):
-        return
+    if original_name is not None and entity:
+        allowed_names = (original_name,) if device_identifier else (None, original_name)
+        if entity.original_name not in allowed_names:
+            return
     if device_identifier is not None:
         # Only move it if it belongs to the device it's being migrated for.
         from homeassistant.helpers import device_registry as dr
@@ -191,10 +193,55 @@ def migrate_unique_id(
     registry.async_update_entity(entity_id, new_unique_id=new)
 
 
+def migrate_network_unique_ids(entry: PanOSConfigEntry) -> None:
+    """Migrate lossy network ids only for a proven name and router device."""
+    network = entry.runtime_data.network
+    data = network.data or {}
+    prefix = entry.entry_id
+    for lr, info in data.get("bgp", {}).items():
+        for peer in info["peers"]:
+            migrate_unique_id(
+                network.hass,
+                "binary_sensor",
+                f"{prefix}_bgp_{safe_key(lr)}_{safe_key(peer)}",
+                f"{prefix}_bgp_{name_key(lr, peer)}",
+                original_name=f"BGP {peer}",
+                device_identifier=(DOMAIN, lr_identifier(prefix, lr)),
+            )
+    for key, group in data.get("path_groups", {}).items():
+        old = key.replace("|", "_").replace("/", "_").replace(".", "_").replace(":", "_")
+        migrate_unique_id(
+            network.hass,
+            "binary_sensor",
+            f"{prefix}_pm_{old}",
+            f"{prefix}_pm_{pm_key_suffix(key)}",
+            original_name=f"Path monitor {group['interface']} via {group['nexthop']}",
+            device_identifier=(DOMAIN, lr_identifier(prefix, group["logical_router"])),
+        )
+
+
 def logical_routers(data: dict[str, Any]) -> list[str]:
     names = {i["logical_router"] for i in data["interfaces"].values() if i["logical_router"]}
     names |= {r["logical_router"] for r in data["fib"]}
     return sorted(names)
+
+
+def _fib_and_egress(
+    interfaces: dict[str, dict[str, Any]], result: Any, previous: list[dict[str, Any]]
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Parse the FIB and calculate its derived routes in one executor job."""
+    fib = parsers.parse_fib(result) if result is not None else previous
+    data = {"interfaces": interfaces, "fib": fib}
+    derived = {
+        lr: {
+            "ipv4": egress(interfaces, fib, lr, PROBE_IPV4),
+            "ipv6": egress(interfaces, fib, lr, PROBE_IPV6),
+            "routes_ipv4": sum(1 for r in fib if r["logical_router"] == lr and r["version"] == 4),
+            "routes_ipv6": sum(1 for r in fib if r["logical_router"] == lr and r["version"] == 6),
+        }
+        for lr in logical_routers(data)
+    }
+    return fib, derived
 
 
 class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
@@ -212,6 +259,7 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         )
         self.configured_interfaces = selected_interfaces
         self.unit_hostname: str | None = None
+        self.unit_serial: str | None = None
         self._prev_counters: dict[str, tuple[float, dict[str, Any]]] = {}
         self._prev_egress: dict[tuple[str, int], str | None] = {}
         self._prev_prefix: dict[str, str | None] = {}
@@ -222,6 +270,8 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         self.slow_interval = timedelta(seconds=SLOW_INTERVAL)
         self._slow_at: datetime | None = None
         self._slow: dict[str, Any] = {}
+        self.freshness_grace = max(interval * 3, timedelta(minutes=3))
+        self._live_at: dict[str, datetime] = {}
         self._prev_gp: dict[str, bool] = {}
         self._gp_known: set[str] = set()
         self._gp_seen: dict[str, dict[str, Any]] = {}
@@ -265,15 +315,16 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
 
     async def _async_update_data(self) -> dict[str, Any]:
         unit = pick_unit(self.config_entry)
-        if unit.config.hostname != self.unit_hostname:
+        if unit.config.serial != self.unit_serial:
             # Different box (failover): counters aren't comparable.
             self._prev_counters.clear()
-            self.unit_hostname = unit.config.hostname
+            self.unit_serial = unit.config.serial
+        self.unit_hostname = unit.config.hostname
 
-        unit_changed = unit.config.hostname != self._slow.get("unit")
-        interfaces, fib, path_monitors, routes_v4, routes_v6 = await asyncio.gather(
+        unit_changed = unit.config.serial != self._slow.get("unit_serial")
+        interfaces, fib_result, path_monitors, routes_v4, routes_v6 = await gather_reads(
             self._optional(unit, "interfaces", CMD_INTERFACE_ALL, parsers.parse_interfaces),
-            self._optional(unit, "fib", CMD_FIB, parsers.parse_fib),
+            self._optional(unit, "fib", CMD_FIB, lambda result: result),
             self._optional(unit, "path_monitor", CMD_PATH_MONITOR, parsers.parse_path_monitor),
             # The full routing table can be large (BGP): decode it off the loop.
             self._optional(
@@ -283,13 +334,27 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                 unit, "routes_ipv6", CMD_ROUTES.format("ipv6"), parsers.parse_default_routes, executor=True
             ),
         )
+        now = dt_util.utcnow()
+        if any(value is not None for value in (interfaces, fib_result, path_monitors, routes_v4, routes_v6)):
+            self._live_at[unit.config.serial] = now
+        live_at = self._live_at.get(unit.config.serial)
+        if live_at is None or now - live_at > self.freshness_grace:
+            raise UpdateFailed(f"{unit.config.host}: no recent successful network read")
         # Current GlobalProtect users come from the unit's own status poll
         # rather than a second identical API call.
-        gp_status = (unit.coordinator.data or {}).get("gp_users")
+        status = unit.coordinator.data or {}
+        fetched_at = status.get("fetched_at")
+        gp_status = (
+            status.get("gp_users")
+            if unit.coordinator.last_update_success
+            and fetched_at is not None
+            and now - fetched_at <= self.freshness_grace
+            else None
+        )
         gp_current = None if gp_status is None else gp_status.get("sessions", [])
         # A failed read keeps the last good value from the same firewall, so a
         # single hiccup doesn't look like every route/monitor vanishing.
-        prev = self.data if self.data and self.data.get("unit") == unit.config.hostname else {}
+        prev = self.data if self.data and self.data.get("unit_serial") == unit.config.serial else {}
         interfaces_ok = interfaces is not None
         if interfaces is None:
             interfaces = prev.get("interfaces")
@@ -304,29 +369,23 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             self._prev_bgp.clear()
             self._route_prev.clear()
             self._route_base.clear()
-        fib_ok = fib is not None
-        if fib is None:
-            fib = prev.get("fib") or []
+        fib_ok = fib_result is not None
+        fib, derived_egress = await self.hass.async_add_executor_job(
+            _fib_and_egress, interfaces, fib_result, prev.get("fib") or []
+        )
         pm_ok = path_monitors is not None
         if path_monitors is None:
             path_monitors = prev.get("path_monitors")
         data: dict[str, Any] = {
             "unit": unit.config.hostname,
+            "unit_serial": unit.config.serial,
             "interfaces": interfaces,
             "fib": fib,
             "path_monitors": path_monitors,
             "gp_current": gp_current,
         }
 
-        data["egress"] = {
-            lr: {
-                "ipv4": egress(interfaces, fib, lr, PROBE_IPV4),
-                "ipv6": egress(interfaces, fib, lr, PROBE_IPV6),
-                "routes_ipv4": sum(1 for r in fib if r["logical_router"] == lr and r["version"] == 4),
-                "routes_ipv6": sum(1 for r in fib if r["logical_router"] == lr and r["version"] == 6),
-            }
-            for lr in logical_routers(data)
-        }
+        data["egress"] = derived_egress
         data["path_groups"] = self._group_path_monitors(interfaces, path_monitors or [])
         data["counters"] = await self._counters(unit, self.selected_interfaces(data))
         if fib_ok:
@@ -345,8 +404,12 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         if unit_changed or self._slow_at is None or now - self._slow_at >= self.slow_interval:
             await self._refresh_slow(unit, interfaces)
             self._slow_at = now
-        data.update({k: v for k, v in self._slow.items() if k not in ("unit", "bgp_ok", "certs_device_ok")})
-        data["gp_users"] = self._gp_users(gp_current, data.get("gp_previous"))
+        data.update(
+            {k: v for k, v in self._slow.items() if k not in ("unit_serial", "bgp_ok", "certs_device_ok")}
+        )
+        data["gp_users"] = (
+            self._gp_users(gp_current, data.get("gp_previous")) if gp_current is not None else None
+        )
         if gp_current is not None:
             # Unknown current users (read failed) must not look like everyone
             # disconnecting.
@@ -457,7 +520,7 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         self._slow_at = None
 
     async def _refresh_slow(self, unit: PanOSUnit, interfaces: dict[str, Any]) -> None:
-        jobs, pending, prefix_pools, bgp, gp_previous, certs_device, certs_store = await asyncio.gather(
+        jobs, pending, prefix_pools, bgp, gp_previous, certs_device, certs_store = await gather_reads(
             self._optional(unit, "jobs", CMD_JOBS, parsers.parse_jobs),
             self._optional(unit, "pending", CMD_PENDING_CHANGES, parsers.parse_pending_changes),
             self._prefix_pools(unit, interfaces),
@@ -466,7 +529,7 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             self._optional(unit, "certs_device", CMD_CERTS_DEVICE, parsers.parse_device_certs, executor=True),
             self._optional(unit, "certs_store", CMD_CERTS_STORE, parsers.parse_cert_store),
         )
-        same_unit = self._slow.get("unit") == unit.config.hostname
+        same_unit = self._slow.get("unit_serial") == unit.config.serial
         prefix_ok = prefix_pools is not None
         if prefix_pools is None:
             prefix_pools = self._slow.get("prefix_pools", {}) if same_unit else {}
@@ -474,7 +537,7 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         if bgp is None:
             bgp = self._slow.get("bgp", {}) if same_unit else {}
         self._slow = {
-            "unit": unit.config.hostname,
+            "unit_serial": unit.config.serial,
             "bgp_ok": bgp_ok,
             "certs_device_ok": certs_device is not None,
             "jobs": jobs,
@@ -504,7 +567,7 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         if not summary:
             return {}
         enabled = [lr for lr, info in summary.items() if info["enabled"]]
-        peers = await asyncio.gather(
+        peers = await gather_reads(
             *(
                 self._optional(unit, f"bgp_peers {lr}", CMD_BGP_PEERS_LR.format(lr), parsers.parse_bgp_peers)
                 for lr in enabled
@@ -632,7 +695,7 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
 
         now = time.monotonic()
         out: dict[str, dict[str, Any]] = {}
-        for name, counters in await asyncio.gather(*(one(n) for n in names)):
+        for name, counters in await gather_reads(*(one(n) for n in names)):
             if counters is None:
                 continue
             rates = {"in_kbps": None, "out_kbps": None}

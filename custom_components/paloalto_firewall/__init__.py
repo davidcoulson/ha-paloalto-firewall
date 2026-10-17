@@ -54,6 +54,8 @@ from .network import (
     LR_DEVICE_FIELDS,
     PanOSNetworkCoordinator,
     cert_uid_suffix,
+    migrate_network_unique_ids,
+    name_key,
     pm_key_suffix,
     safe_key,
 )
@@ -70,6 +72,16 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: PanOSConfigEntry) -> bool:
+    units: list[PanOSUnit] = []
+    try:
+        return await _async_setup_entry(hass, entry, units)
+    except BaseException:
+        for unit in units:
+            unit.client.close()
+        raise
+
+
+async def _async_setup_entry(hass: HomeAssistant, entry: PanOSConfigEntry, units: list[PanOSUnit]) -> bool:
     session = async_get_clientsession(hass, verify_ssl=entry.data[CONF_VERIFY_SSL])
     scan = timedelta(seconds=entry.options.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL))
     update_every = timedelta(hours=entry.options.get(CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL))
@@ -92,7 +104,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: PanOSConfigEntry) -> boo
 
         return _save
 
-    units: list[PanOSUnit] = []
     for index, raw in enumerate(entry.data[CONF_UNITS]):
         unit = UnitConfig(
             index=index,
@@ -126,6 +137,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: PanOSConfigEntry) -> boo
             pan_unit.client.close()
 
     entry.async_on_unload(hass.bus.async_listen(EVENT_HOMEASSISTANT_STOP, _on_stop))
+    for pan_unit in units:
+        entry.async_on_unload(pan_unit.client.close)
 
     # The only reads setup waits for: each unit's status (system info, HA
     # state), run in parallel. One unit being down (e.g. mid-upgrade) must
@@ -252,6 +265,7 @@ def _remove_stale_network_entities(hass: HomeAssistant, entry: PanOSConfigEntry)
     network = entry.runtime_data.network
     if network.data is None:
         return
+    migrate_network_unique_ids(entry)
     data = network.data
     ok = data.get("sources_ok", {})
     # Interface entities: exact ids, and only prune auto-selected interfaces
@@ -274,7 +288,7 @@ def _remove_stale_network_entities(hass: HomeAssistant, entry: PanOSConfigEntry)
     bgp_prefix = f"{entry.entry_id}_bgp_"
     bgp_keep = {f"{bgp_prefix}{lr}_established" for lr in data.get("bgp", {})}
     bgp_keep |= {
-        f"{bgp_prefix}{safe_key(lr)}_{safe_key(peer)}"
+        f"{bgp_prefix}{name_key(lr, peer)}"
         for lr, info in data.get("bgp", {}).items()
         if info["ok"]
         for peer in info["peers"]

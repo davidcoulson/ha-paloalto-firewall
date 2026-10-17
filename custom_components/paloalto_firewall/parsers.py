@@ -914,7 +914,8 @@ def nptv6_mismatches(rules: dict[str, dict[str, Any]], pool: dict[str, Any]) -> 
     """NPTv6 rules for this pool's WAN that don't fit the delegated prefix.
 
     A rule belongs to the pool's WAN when its to-interface is the pool's
-    interface, or (for inbound rules without one) it sits in the same vsys.
+    interface. Inbound rules without a to-interface have unknown ownership
+    and are skipped.
     Returns (problems, rules checked).
     """
     problems: list[str] = []
@@ -930,7 +931,7 @@ def nptv6_mismatches(rules: dict[str, dict[str, Any]], pool: dict[str, Any]) -> 
         if to_if and to_if != pool["interface"]:
             continue
         info = nptv6_prefixes(rule)
-        if info["direction"] is None:
+        if info["direction"] is None or (info["direction"] == "inbound" and not to_if):
             continue
         checked.append(name)
         if info["dynamic"]:
@@ -965,10 +966,24 @@ def _json_result(result: ET.Element) -> Any:
         raise ValueError(f"Invalid JSON in response: {err}") from err
 
 
+def _json_object(value: Any) -> dict[str, Any]:
+    """Require a JSON object before accessing its fields."""
+    if not isinstance(value, dict):
+        raise ValueError("Expected a JSON object")
+    return value
+
+
+def _json_objects(value: Any) -> list[dict[str, Any]]:
+    """Require a list of JSON objects before iterating over records."""
+    if not isinstance(value, list) or any(not isinstance(item, dict) for item in value):
+        raise ValueError("Expected a list of JSON objects")
+    return value
+
+
 def parse_bgp_summary(result: ET.Element) -> dict[str, dict[str, Any]]:
     """{logical router: {enabled, router_id, local_as}}."""
     out = {}
-    for lr, info in (_json_result(result) or {}).items():
+    for lr, info in _json_object(_json_result(result)).items():
         if isinstance(info, dict):
             out[lr] = {
                 "enabled": str(info.get("enabled", "")).lower() in ("yes", "true"),
@@ -981,16 +996,16 @@ def parse_bgp_summary(result: ET.Element) -> dict[str, dict[str, Any]]:
 def parse_bgp_peers(result: ET.Element) -> dict[str, dict[str, Any]]:
     """Per-logical-router 'bgp peer status' -> {peer name: {...}}."""
     peers: dict[str, dict[str, Any]] = {}
-    for name, p in (_json_result(result) or {}).items():
+    for name, p in _json_object(_json_result(result)).items():
         if not isinstance(p, dict) or "state" not in p:
             continue
-        detail = p.get("detail") or {}
+        detail = _json_object(p.get("detail", {}))
         prefixes = {
             afi: {
                 "accepted": info.get("acceptedPrefixCounter"),
                 "sent": info.get("sentPrefixCounter"),
             }
-            for afi, info in (detail.get("addressFamilyInfo") or {}).items()
+            for afi, info in _json_object(detail.get("addressFamilyInfo", {})).items()
             if isinstance(info, dict)
         }
         status_time = p.get("status-time")
@@ -1281,7 +1296,13 @@ def certs_expiring(
     for c in store:
         expires = datetime.fromisoformat(c["expires"])
         days = (expires - now).total_seconds() / 86400
-        item = {"name": c["name"], "expires": c["expires"], "days_left": int(days // 1)}
+        item = {
+            "name": c["name"],
+            "serial": c.get("serial"),
+            "issuer": c.get("issuer"),
+            "expires": c["expires"],
+            "days_left": int(days // 1),
+        }
         if c.get("status") == "revoked":
             continue
         if days < 0 or c.get("status") == "expired":
@@ -1340,15 +1361,20 @@ def parse_default_routes(result: ET.Element) -> dict[str, dict[str, Any]]:
     raw = result.findtext("json")
     if raw is None:
         raise ValueError("No route table in response")
-    table = json.loads(raw) if raw.strip() else {}
+    table = _json_object(json.loads(raw) if raw.strip() else {})
     out: dict[str, dict[str, Any]] = {}
     for lr, prefixes in table.items():
+        prefixes = _json_object(prefixes)
         for prefix, family in (("0.0.0.0/0", "ipv4"), ("::/0", "ipv6")):
-            selected = next((r for r in prefixes.get(prefix) or [] if r.get("selected")), None)
+            routes = _json_objects(prefixes.get(prefix, []))
+            selected = next((r for r in routes if r.get("selected")), None)
             if selected is None:
                 continue
-            hops = selected.get("nexthops") or []
+            hops = _json_objects(selected.get("nexthops", []))
             hop = next((n for n in hops if n.get("active")), hops[0] if hops else {})
+            uptime = selected.get("uptime")
+            if uptime is not None and not isinstance(uptime, str):
+                raise ValueError("Expected route uptime to be a string")
             out.setdefault(lr, {})[family] = {
                 "protocol": selected.get("protocol"),
                 "distance": selected.get("distance"),

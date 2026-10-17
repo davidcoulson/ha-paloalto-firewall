@@ -144,7 +144,13 @@ class PanOSConfigFlow(ConfigFlow, domain=DOMAIN):
                 if len(units) == 2 and units[0]["serial"] == units[1]["serial"]:
                     errors["base"] = "same_device"
                 else:
-                    await self.async_set_unique_id("_".join(sorted(u["serial"] for u in units)))
+                    serials = {u["serial"] for u in units}
+                    if any(
+                        serials.intersection(u["serial"] for u in entry.data[CONF_UNITS])
+                        for entry in self._async_current_entries()
+                    ):
+                        return self.async_abort(reason="already_configured")
+                    await self.async_set_unique_id("_".join(sorted(serials)))
                     self._abort_if_unique_id_configured()
                     for u in units:
                         if len(units) == 2 and not (u["ha"] or {}).get("enabled"):
@@ -181,13 +187,15 @@ class PanOSConfigFlow(ConfigFlow, domain=DOMAIN):
             ok = False
             for unit in entry.data[CONF_UNITS]:
                 try:
-                    await _probe(
+                    probed = await _probe(
                         self.hass,
                         unit["host"],
                         user_input[CONF_USERNAME],
                         user_input[CONF_PASSWORD],
                         entry.data[CONF_VERIFY_SSL],
                     )
+                    if probed["serial"] != unit["serial"]:
+                        return self.async_abort(reason="serial_mismatch")
                     ok = True
                 except InvalidAuth:
                     errors["base"] = "invalid_auth"
