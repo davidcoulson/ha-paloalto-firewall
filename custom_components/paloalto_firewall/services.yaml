@@ -249,3 +249,33 @@ backup_config:
           min: 1
           max: 1000
           mode: box
+
+sync_nptv6_objects:
+  fields:
+    pool:
+      required: true
+      example: spectrum
+      selector:
+        text:
+    object_64:
+      required: true
+      example: spectrum-npt-64
+      selector:
+        text:
+    object_60:
+      required: true
+      example: spectrum-nptv6
+      selector:
+        text:
+    vsys:
+      example: vsys1
+      selector:
+        text:
+    commit:
+      default: false
+      selector:
+        boolean:
+    config_entry_id:
+      selector:
+        config_entry:
+          integration: paloalto_firewall

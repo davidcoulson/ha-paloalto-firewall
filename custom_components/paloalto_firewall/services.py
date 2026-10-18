@@ -40,6 +40,7 @@ from .const import (
     SERVICE_LOOKUP,
     SERVICE_ROUTE_LOOKUP,
     SERVICE_SESSION_LOOKUP,
+    SERVICE_SYNC_NPTV6,
     SERVICE_TEST_NAT_POLICY,
     SERVICE_TEST_SECURITY_POLICY,
 )
@@ -653,6 +654,96 @@ async def _async_backup_config(call: ServiceCall) -> ServiceResponse:
     return {"folder": str(root), "firewalls": saved, "errors": errors} if call.return_response else None
 
 
+SYNC_NPTV6_SCHEMA = vol.Schema(
+    {
+        vol.Optional(ATTR_CONFIG_ENTRY_ID): cv.string,
+        vol.Required("pool"): cv.string,
+        vol.Required("object_64"): cv.string,
+        vol.Required("object_60"): cv.string,
+        vol.Optional("vsys"): cv.string,
+        vol.Optional("commit", default=False): cv.boolean,
+    }
+)
+
+# Which /64 and /60 of the delegated /56 the two NPTv6 address objects take.
+NPT_64_SLOT = 0xEF
+NPT_60_SLOT = 0xF0
+
+
+def nptv6_targets(delegated: str) -> tuple[str, str]:
+    """(/64, /60) inside a delegated /56: slots ef and f0 of its fourth hextet."""
+    try:
+        net = ipaddress.ip_network(delegated, strict=False)
+    except ValueError as err:
+        raise ServiceValidationError(f"Delegated prefix {delegated!r} isn't a valid prefix") from err
+    if net.version != 6 or net.prefixlen != 56:
+        raise ServiceValidationError(f"Delegated prefix {net} isn't an IPv6 /56")
+    base = int(net.network_address)
+    return (
+        f"{ipaddress.IPv6Address(base | NPT_64_SLOT << 64)}/64",
+        f"{ipaddress.IPv6Address(base | NPT_60_SLOT << 64)}/60",
+    )
+
+
+def _address_xpath(name: str, vsys: str | None) -> str:
+    if "'" in name:
+        raise ServiceValidationError(f"Invalid object name {name!r}")
+    if vsys:
+        if "'" in vsys:
+            raise ServiceValidationError(f"Invalid vsys {vsys!r}")
+        base = f"/config/devices/entry[@name='localhost.localdomain']/vsys/entry[@name='{vsys}']"
+    else:
+        base = "/config/shared"
+    return f"{base}/address/entry[@name='{name}']/ip-netmask"
+
+
+async def _async_sync_nptv6(call: ServiceCall) -> ServiceResponse:
+    """Point two address objects at the /64 and /60 inside a pool's delegated /56.
+
+    Edits the candidate config on the active unit (existing objects only, only
+    their ip-netmask) and, if asked, commits just this API user's changes.
+    """
+    hass = call.hass
+    entry = _get_entry(hass, call.data.get(ATTR_CONFIG_ENTRY_ID))
+    network = entry.runtime_data.network
+    pools = ((network.data if network else None) or {}).get("prefix_pools", {})
+    pool = pools.get(call.data["pool"])
+    if pool is None:
+        raise ServiceValidationError(
+            f"No delegated-prefix pool named {call.data['pool']!r} (known: {', '.join(sorted(pools)) or 'none'})"
+        )
+    target_64, target_60 = nptv6_targets(pool.get("prefix") or "")
+    vsys = call.data.get("vsys")
+    unit = _candidate_units(entry)[0]
+    changes: dict[str, dict[str, Any]] = {}
+    try:
+        for name, target in ((call.data["object_64"], target_64), (call.data["object_60"], target_60)):
+            xpath = _address_xpath(name, vsys)
+            current = (await unit.client.config("get", xpath)).findtext("ip-netmask")
+            if current is None:
+                raise ServiceValidationError(f"Address object {name!r} with an ip-netmask wasn't found")
+            current = current.strip()
+            if current != target:
+                await unit.client.config("edit", xpath, f"<ip-netmask>{escape(target)}</ip-netmask>")
+            changes[name] = {"previous": current, "new": target, "changed": current != target}
+        commit = None
+        if call.data["commit"] and any(c["changed"] for c in changes.values()):
+            commit = await unit.client.commit(unit.client.username)
+    except PanOSAuthError as err:
+        raise HomeAssistantError(f"Authentication failed: {err}") from err
+    except PanOSError as err:
+        raise HomeAssistantError(f"Could not update the NPTv6 objects on {unit.config.hostname}: {err}") from err
+    if network:
+        await network.async_request_refresh()
+    return {
+        "firewall": unit.config.hostname,
+        "delegated_prefix": pool["prefix"],
+        "objects": changes,
+        "committed": commit is not None,
+        "commit": commit,
+    } if call.return_response else None
+
+
 async def _async_check_updates(call: ServiceCall) -> ServiceResponse:
     """Run the software, content, GlobalProtect client and licence checks now."""
     entry = _get_entry(call.hass, call.data.get(ATTR_CONFIG_ENTRY_ID))
@@ -688,6 +779,13 @@ async def _async_check_updates(call: ServiceCall) -> ServiceResponse:
 
 
 def async_setup_services(hass: HomeAssistant) -> None:
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_SYNC_NPTV6,
+        _async_sync_nptv6,
+        schema=SYNC_NPTV6_SCHEMA,  # type: ignore[arg-type]  # HA types schemas as probatio
+        supports_response=SupportsResponse.OPTIONAL,
+    )
     hass.services.async_register(
         DOMAIN,
         SERVICE_BACKUP_CONFIG,

@@ -232,6 +232,34 @@ actions:
 
 The file is a normal PAN-OS config: import it under Device → Setup → Operations → *Import named configuration snapshot*. Secrets in it are encrypted with the firewall's master key, but treat the files as sensitive.
 
+## Keep NPTv6 address objects on the delegated prefix
+
+When an ISP changes your delegated /56, static NPTv6 rules stop translating into it and IPv6 breaks until the rules follow (see the *NPTv6 prefix mismatch* sensor above). `paloalto_firewall.sync_nptv6_objects` repoints two existing address objects at the right place in the current /56: `object_64` becomes the `…:ef::/64` and `object_60` the `…:f0::/60` of the pool's delegated prefix (slots `ef` and `f0` of the fourth hextet). For 2603:6011:4200:2500::/56 that is 2603:6011:4200:25ef::/64 and 2603:6011:4200:25f0::/60.
+
+```yaml
+action: paloalto_firewall.sync_nptv6_objects
+data:
+  pool: spectrum
+  object_64: spectrum-npt-64
+  object_60: spectrum-nptv6
+  commit: true
+```
+
+It only edits the `ip-netmask` of objects that already exist (shared ones unless you pass `vsys`), on the active firewall, and skips any that already match. With `commit: true` it commits only this API user's changes and waits for the job, and nothing is committed when nothing changed; without it the change sits in the candidate config until you commit. Unlike the rest of the integration this needs an admin role that can edit (and commit) the configuration, not just the read-only operational API. Run it from the prefix-change automation:
+
+```yaml
+triggers:
+  - trigger: event
+    event_type: paloalto_firewall_prefix_change
+actions:
+  - action: paloalto_firewall.sync_nptv6_objects
+    data:
+      pool: "{{ trigger.event.data.pool }}"
+      object_64: "{{ trigger.event.data.pool }}-npt-64"
+      object_60: "{{ trigger.event.data.pool }}-nptv6"
+      commit: true
+```
+
 ## Route lookup
 
 `paloalto_firewall.route_lookup` returns the route, egress interface, next hop, zone and vsys a destination uses. Searches one `logical_router`, the logical router of a `source` IP's interface, or all of them:

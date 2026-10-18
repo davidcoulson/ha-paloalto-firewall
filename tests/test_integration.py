@@ -1064,6 +1064,55 @@ async def test_backup_config(hass: HomeAssistant, fake, freezer, tmp_path) -> No
     assert all(r["errors"] == {} for r in results)
 
 
+async def test_sync_nptv6_objects(hass: HomeAssistant, fake) -> None:
+    from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
+
+    shared = "/config/shared/address/entry[@name='{}']/ip-netmask"
+    fake.objects = {shared.format("npt-64"): "2001:db8:aaa:ef::/64", shared.format("npt-60"): "2001:db8:aaa:f0::/60"}
+    await _setup(hass, fake)  # wan-b's delegated prefix is 2001:db8:b00::/56
+    call = {"pool": "wan-b", "object_64": "npt-64", "object_60": "npt-60"}
+
+    r = await hass.services.async_call(DOMAIN, "sync_nptv6_objects", call, blocking=True, return_response=True)
+    assert r["firewall"] == "fw1" and r["committed"] is False and fake.commits == []
+    assert r["objects"]["npt-64"] == {"previous": "2001:db8:aaa:ef::/64", "new": "2001:db8:b00:ef::/64", "changed": True}
+    assert fake.objects[shared.format("npt-60")] == "2001:db8:b00:f0::/60"
+
+    # Already aligned: nothing is edited, and nothing is committed even when asked.
+    edits = sum(c.endswith(":edit") for _, c in fake.calls)
+    r = await hass.services.async_call(
+        DOMAIN, "sync_nptv6_objects", {**call, "commit": True}, blocking=True, return_response=True
+    )
+    assert not any(o["changed"] for o in r["objects"].values()) and r["committed"] is False
+    assert sum(c.endswith(":edit") for _, c in fake.calls) == edits and fake.commits == []
+
+    # A change with commit=True commits only this API user's changes and reports the job.
+    fake.objects[shared.format("npt-60")] = "2001:db8:aaa:f0::/60"
+    r = await hass.services.async_call(
+        DOMAIN, "sync_nptv6_objects", {**call, "commit": True}, blocking=True, return_response=True
+    )
+    assert r["committed"] is True and r["commit"]["job"] == "77"
+    assert fake.commits == ["<commit><partial><admin><member>u</member></admin></partial></commit>"]
+
+    # Failed commit job, unknown pool, missing object and a bad delegated prefix are all errors.
+    fake.objects[shared.format("npt-60")] = "2001:db8:aaa:f0::/60"
+    fake.commit_result = "FAIL"
+    with pytest.raises(HomeAssistantError, match="Commit job 77"):
+        await hass.services.async_call(DOMAIN, "sync_nptv6_objects", {**call, "commit": True}, blocking=True)
+    with pytest.raises(ServiceValidationError, match="No delegated-prefix pool"):
+        await hass.services.async_call(DOMAIN, "sync_nptv6_objects", {**call, "pool": "nope"}, blocking=True)
+    with pytest.raises(ServiceValidationError, match="wasn't found"):
+        await hass.services.async_call(DOMAIN, "sync_nptv6_objects", {**call, "object_64": "missing"}, blocking=True)
+
+
+def test_nptv6_targets() -> None:
+    from custom_components.paloalto_firewall.services import nptv6_targets
+
+    assert nptv6_targets("2603:6011:4200:2500::/56") == ("2603:6011:4200:25ef::/64", "2603:6011:4200:25f0::/60")
+    for bad in ("2603:6011:4200:25ef::/64", "10.0.0.0/24", "", "nope"):
+        with pytest.raises(Exception):  # noqa: B017 - ServiceValidationError
+            nptv6_targets(bad)
+
+
 async def test_repairs(hass: HomeAssistant, fake, freezer) -> None:
     from homeassistant.helpers import issue_registry as ir
 
