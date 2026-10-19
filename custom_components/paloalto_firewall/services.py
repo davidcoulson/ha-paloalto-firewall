@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import logging
 import os
 import re
 import tempfile
@@ -46,6 +47,8 @@ from .const import (
 )
 from .coordinator import PanOSConfigEntry, PanOSUnit
 from .network import egress, ingress_interface, trace_path
+
+_LOGGER = logging.getLogger(__name__)
 
 ATTR_CONFIG_ENTRY_ID = "config_entry_id"
 ATTR_QUERY = "query"
@@ -715,16 +718,34 @@ async def _async_sync_nptv6(call: ServiceCall) -> ServiceResponse:
     vsys = call.data.get("vsys")
     unit = _candidate_units(entry)[0]
     changes: dict[str, dict[str, Any]] = {}
+    xpaths: dict[str, str] = {}
     try:
+        # Read every object first so a missing one fails before anything is edited.
         for name, target in ((call.data["object_64"], target_64), (call.data["object_60"], target_60)):
-            xpath = _address_xpath(name, vsys)
-            current = (await unit.client.config("get", xpath)).findtext("ip-netmask")
+            xpaths[name] = _address_xpath(name, vsys)
+            current = (await unit.client.config("get", xpaths[name])).findtext("ip-netmask")
             if current is None:
                 raise ServiceValidationError(f"Address object {name!r} with an ip-netmask wasn't found")
             current = current.strip()
-            if current != target:
-                await unit.client.config("edit", xpath, f"<ip-netmask>{escape(target)}</ip-netmask>")
             changes[name] = {"previous": current, "new": target, "changed": current != target}
+        edited: list[str] = []
+        try:
+            for name, change in changes.items():
+                if change["changed"]:
+                    await unit.client.config(
+                        "edit", xpaths[name], f"<ip-netmask>{escape(change['new'])}</ip-netmask>"
+                    )
+                    edited.append(name)
+        except PanOSError:
+            # Don't leave half the pair edited in the candidate config for the next admin commit.
+            for name in edited:
+                try:
+                    await unit.client.config(
+                        "edit", xpaths[name], f"<ip-netmask>{escape(changes[name]['previous'])}</ip-netmask>"
+                    )
+                except PanOSError:
+                    _LOGGER.warning("Could not restore %s after a failed NPTv6 sync", name)
+            raise
         commit = None
         if call.data["commit"] and any(c["changed"] for c in changes.values()):
             commit = await unit.client.commit(unit.client.username)

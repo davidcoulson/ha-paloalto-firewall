@@ -188,6 +188,14 @@ async def test_auth_failure_starts_reauth(hass: HomeAssistant, fake) -> None:
     assert entry.data[CONF_PASSWORD] == "new"
 
 
+async def test_one_unit_auth_failure_starts_reauth(hass: HomeAssistant, fake) -> None:
+    fake.bad_hosts = {"fw2.lan"}
+    entry = await _setup(hass, fake)
+    assert entry.state is config_entries.ConfigEntryState.LOADED
+    flows = hass.config_entries.flow.async_progress()
+    assert any(f["context"]["source"] == "reauth" for f in flows)
+
+
 async def test_options_and_unload(hass: HomeAssistant, fake) -> None:
     entry = await _setup(hass, fake)
     result = await hass.config_entries.options.async_init(entry.entry_id)
@@ -1101,6 +1109,22 @@ async def test_sync_nptv6_objects(hass: HomeAssistant, fake) -> None:
     )
     assert r["committed"] is True and r["commit"]["job"] == "77"
     assert fake.commits == ["<commit><partial><admin><member>u</member></admin></partial></commit>"]
+
+    # A failing second edit restores the first, and a missing second object edits nothing.
+    shared_60 = shared.format("npt-60")
+    fake.objects[shared.format("npt-64")] = "2001:db8:aaa:ef::/64"
+    fake.objects[shared_60] = "2001:db8:aaa:f0::/60"
+    fake.fail_edit_xpath = shared_60
+    with pytest.raises(HomeAssistantError, match="Could not update"):
+        await hass.services.async_call(DOMAIN, "sync_nptv6_objects", call, blocking=True)
+    fake.fail_edit_xpath = None
+    assert fake.objects[shared.format("npt-64")] == "2001:db8:aaa:ef::/64"
+    edits = sum(c.endswith(":edit") for _, c in fake.calls)
+    with pytest.raises(ServiceValidationError, match="wasn't found"):
+        await hass.services.async_call(
+            DOMAIN, "sync_nptv6_objects", {**call, "object_60": "missing"}, blocking=True
+        )
+    assert sum(c.endswith(":edit") for _, c in fake.calls) == edits
 
     # Failed commit job, unknown pool, missing object and a bad delegated prefix are all errors.
     fake.objects[shared.format("npt-60")] = "2001:db8:aaa:f0::/60"

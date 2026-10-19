@@ -156,6 +156,10 @@ async def _async_setup_entry(hass: HomeAssistant, entry: PanOSConfigEntry, units
             if isinstance(err, ConfigEntryAuthFailed):
                 raise err
         raise ConfigEntryNotReady(str(errors[0])) from errors[0]
+    if any(isinstance(err, ConfigEntryAuthFailed) for err in errors):
+        # The other unit loaded, so the pair is set up, but the failed unit's credentials
+        # are bad: first refresh raises auth errors rather than starting reauth itself.
+        entry.async_start_reauth(hass)
 
     runtime = PanOSRuntimeData(name=entry.data[CONF_NAME], units=units)
     runtime.key_store = key_store
