@@ -1068,13 +1068,22 @@ async def test_sync_nptv6_objects(hass: HomeAssistant, fake) -> None:
     from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 
     shared = "/config/shared/address/entry[@name='{}']/ip-netmask"
-    fake.objects = {shared.format("npt-64"): "2001:db8:aaa:ef::/64", shared.format("npt-60"): "2001:db8:aaa:f0::/60"}
+    fake.objects = {
+        shared.format("npt-64"): "2001:db8:aaa:ef::/64",
+        shared.format("npt-60"): "2001:db8:aaa:f0::/60",
+    }
     await _setup(hass, fake)  # wan-b's delegated prefix is 2001:db8:b00::/56
     call = {"pool": "wan-b", "object_64": "npt-64", "object_60": "npt-60"}
 
-    r = await hass.services.async_call(DOMAIN, "sync_nptv6_objects", call, blocking=True, return_response=True)
+    r = await hass.services.async_call(
+        DOMAIN, "sync_nptv6_objects", call, blocking=True, return_response=True
+    )
     assert r["firewall"] == "fw1" and r["committed"] is False and fake.commits == []
-    assert r["objects"]["npt-64"] == {"previous": "2001:db8:aaa:ef::/64", "new": "2001:db8:b00:ef::/64", "changed": True}
+    assert r["objects"]["npt-64"] == {
+        "previous": "2001:db8:aaa:ef::/64",
+        "new": "2001:db8:b00:ef::/64",
+        "changed": True,
+    }
     assert fake.objects[shared.format("npt-60")] == "2001:db8:b00:f0::/60"
 
     # Already aligned: nothing is edited, and nothing is committed even when asked.
@@ -1101,13 +1110,18 @@ async def test_sync_nptv6_objects(hass: HomeAssistant, fake) -> None:
     with pytest.raises(ServiceValidationError, match="No delegated-prefix pool"):
         await hass.services.async_call(DOMAIN, "sync_nptv6_objects", {**call, "pool": "nope"}, blocking=True)
     with pytest.raises(ServiceValidationError, match="wasn't found"):
-        await hass.services.async_call(DOMAIN, "sync_nptv6_objects", {**call, "object_64": "missing"}, blocking=True)
+        await hass.services.async_call(
+            DOMAIN, "sync_nptv6_objects", {**call, "object_64": "missing"}, blocking=True
+        )
 
 
 def test_nptv6_targets() -> None:
     from custom_components.paloalto_firewall.services import nptv6_targets
 
-    assert nptv6_targets("2603:6011:4200:2500::/56") == ("2603:6011:4200:25ef::/64", "2603:6011:4200:25f0::/60")
+    assert nptv6_targets("2603:6011:4200:2500::/56") == (
+        "2603:6011:4200:25ef::/64",
+        "2603:6011:4200:25f0::/60",
+    )
     for bad in ("2603:6011:4200:25ef::/64", "10.0.0.0/24", "", "nope"):
         with pytest.raises(Exception):  # noqa: B017 - ServiceValidationError
             nptv6_targets(bad)

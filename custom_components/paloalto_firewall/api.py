@@ -172,7 +172,9 @@ class PanOSClient:
                         break
                     await asyncio.sleep(LOG_POLL_SECONDS)
         except TimeoutError as err:
-            raise PanOSConnectionError(f"Commit job {job} on {self.host} still running after {timeout} s") from err
+            raise PanOSConnectionError(
+                f"Commit job {job} on {self.host} still running after {timeout} s"
+            ) from err
         outcome = (result.findtext("job/result") or "").strip()
         details = "; ".join(line.text.strip() for line in result.findall("job/details/line") if line.text)
         if outcome != "OK":

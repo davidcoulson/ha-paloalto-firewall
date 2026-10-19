@@ -709,9 +709,8 @@ async def _async_sync_nptv6(call: ServiceCall) -> ServiceResponse:
     pools = ((network.data if network else None) or {}).get("prefix_pools", {})
     pool = pools.get(call.data["pool"])
     if pool is None:
-        raise ServiceValidationError(
-            f"No delegated-prefix pool named {call.data['pool']!r} (known: {', '.join(sorted(pools)) or 'none'})"
-        )
+        known = ", ".join(sorted(pools)) or "none"
+        raise ServiceValidationError(f"No delegated-prefix pool named {call.data['pool']!r} (known: {known})")
     target_64, target_60 = nptv6_targets(pool.get("prefix") or "")
     vsys = call.data.get("vsys")
     unit = _candidate_units(entry)[0]
@@ -732,16 +731,22 @@ async def _async_sync_nptv6(call: ServiceCall) -> ServiceResponse:
     except PanOSAuthError as err:
         raise HomeAssistantError(f"Authentication failed: {err}") from err
     except PanOSError as err:
-        raise HomeAssistantError(f"Could not update the NPTv6 objects on {unit.config.hostname}: {err}") from err
+        raise HomeAssistantError(
+            f"Could not update the NPTv6 objects on {unit.config.hostname}: {err}"
+        ) from err
     if network:
         await network.async_request_refresh()
-    return {
-        "firewall": unit.config.hostname,
-        "delegated_prefix": pool["prefix"],
-        "objects": changes,
-        "committed": commit is not None,
-        "commit": commit,
-    } if call.return_response else None
+    return (
+        {
+            "firewall": unit.config.hostname,
+            "delegated_prefix": pool["prefix"],
+            "objects": changes,
+            "committed": commit is not None,
+            "commit": commit,
+        }
+        if call.return_response
+        else None
+    )
 
 
 async def _async_check_updates(call: ServiceCall) -> ServiceResponse:
