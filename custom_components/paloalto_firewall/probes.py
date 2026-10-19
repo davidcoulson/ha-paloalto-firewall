@@ -12,6 +12,7 @@ import logging
 import xml.etree.ElementTree as ET
 from copy import deepcopy
 from typing import Any
+from xml.sax.saxutils import escape
 
 from .api import PanOSClient, PanOSError
 from .const import (
@@ -112,8 +113,8 @@ async def collect(client: PanOSClient) -> dict[str, Any]:
         out[f"running_nat_{vsys}"] = await _run(client, CMD_RUNNING_NAT, vsys)
     routers = sorted({i["logical_router"] for i in ifaces.values() if i.get("logical_router")})
     for lr in routers:
-        out[f"bgp_peers_{lr}"] = await _run(client, CMD_BGP_PEERS_LR.format(lr))
+        out[f"bgp_peers_{lr}"] = await _run(client, CMD_BGP_PEERS_LR.format(escape(lr)))
     hw = next((n for n in sorted(ifaces) if n.startswith("ethernet") and "." not in n), None)
     if hw:
-        out["interface_detail"] = await _run(client, f"<show><interface>{hw}</interface></show>")
+        out["interface_detail"] = await _run(client, f"<show><interface>{escape(hw)}</interface></show>")
     return out

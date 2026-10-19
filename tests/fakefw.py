@@ -495,6 +495,8 @@ class FakePair:
             "fw2.lan": {"hostname": "fw2", "serial": "0123456789002", "state": "passive", "up": True},
         }
         self.bad_password = False
+        self.bad_hosts: set[str] = set()
+        self.fail_edit_xpath: str | None = None
         self.calls: list[tuple[str, str]] = []
         self.vsys_calls: list[tuple[str, str | None]] = []
         self.core_v4_via = "b"
@@ -567,6 +569,8 @@ class FakePair:
                 return '<response status="success" code="7"><result/></response>', 200
             return OK.format(f"<ip-netmask>{self.objects[xpath]}</ip-netmask>"), 200
         assert data["action"] == "edit" and xpath in self.objects
+        if xpath == self.fail_edit_xpath:
+            return '<response status="error"><msg><line>Edit failed</line></msg></response>', 200
         self.objects[xpath] = data["element"].removeprefix("<ip-netmask>").removesuffix("</ip-netmask>")
         return '<response status="success" code="20"><msg>command succeeded</msg></response>', 200
 
@@ -726,7 +730,7 @@ class FakePair:
                 fake.keygens += 1
                 if not fake.units[self.host]["up"]:
                     raise PanOSConnectionError(f"{self.host} down")
-                if fake.bad_password:
+                if fake.bad_password or self.host in fake.bad_hosts:
                     return INVALID_CREDENTIAL
                 return OK.format(f"<key>{fake.issue_key}</key>"), 200
             if headers.get("X-PAN-KEY") not in fake.valid_keys:

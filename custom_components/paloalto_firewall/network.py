@@ -12,6 +12,7 @@ import time
 from collections.abc import Callable
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
+from xml.sax.saxutils import escape
 
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryAuthFailed
@@ -689,7 +690,7 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             return name, await self._optional(
                 unit,
                 f"counters {name}",
-                f"<show><interface>{name}</interface></show>",
+                f"<show><interface>{escape(name)}</interface></show>",
                 parsers.parse_interface_counters,
             )
 
