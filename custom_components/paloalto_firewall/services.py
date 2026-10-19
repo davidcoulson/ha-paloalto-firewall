@@ -717,7 +717,7 @@ async def _async_sync_nptv6(call: ServiceCall) -> ServiceResponse:
     target_64, target_60 = nptv6_targets(pool.get("prefix") or "")
     vsys = call.data.get("vsys")
     unit = _candidate_units(entry)[0]
-    changes: dict[str, dict[str, Any]] = {}
+    changes: dict[str, Any] = {}
     xpaths: dict[str, str] = {}
     try:
         # Read every object first so a missing one fails before anything is edited.
