@@ -549,6 +549,26 @@ class FakePair:
         self.hold = None
         self.hold_cmd = None
         self.held = 0
+        # Address objects the config API can read/edit (xpath -> ip-netmask), and commits made.
+        self.objects: dict[str, str] = {}
+        self.commits: list[str] = []
+        self.commit_result = "OK"
+
+    def config(self, host, data):
+        self.calls.append((host, f"config:{data['type']}:{data.get('action', '')}"))
+        if not self.units[host]["up"]:
+            raise PanOSConnectionError(f"{host} down")
+        if data["type"] == "commit":
+            self.commits.append(data["cmd"])
+            return OK.format("<msg><line>Commit job enqueued with jobid 77</line></msg><job>77</job>"), 200
+        xpath = data["xpath"]
+        if data["action"] == "get":
+            if xpath not in self.objects:
+                return '<response status="success" code="7"><result/></response>', 200
+            return OK.format(f"<ip-netmask>{self.objects[xpath]}</ip-netmask>"), 200
+        assert data["action"] == "edit" and xpath in self.objects
+        self.objects[xpath] = data["element"].removeprefix("<ip-netmask>").removesuffix("</ip-netmask>")
+        return '<response status="success" code="20"><msg>command succeeded</msg></response>', 200
 
     def peer(self, host):
         return next(u for h, u in self.units.items() if h != host)
@@ -581,6 +601,14 @@ class FakePair:
                     '<config version="11.1.0"><devices><entry name="localhost.localdomain">'
                     f"<deviceconfig><system><hostname>{unit['hostname']}</hostname></system>"
                     "</deviceconfig></entry></devices></config>"
+                ),
+                200,
+            )
+        if cmd.startswith("<show><jobs><id>"):
+            return (
+                OK.format(
+                    f"<job><id>77</id><status>FIN</status><result>{self.commit_result}</result>"
+                    "<details><line>Configuration committed successfully</line></details></job>"
                 ),
                 200,
             )
@@ -709,6 +737,8 @@ class FakePair:
                 await fake.hold.wait()
             if data["type"] == "log":
                 return fake.log(self.host, data)
+            if data["type"] in ("config", "commit"):
+                return fake.config(self.host, data)
             cmd = data["cmd"]
             vsys = data.get("vsys")
             fake.last_vsys = vsys

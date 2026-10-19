@@ -316,6 +316,36 @@
           "description": "How many backups to keep per firewall; older ones are deleted."
         }
       }
+    },
+    "sync_nptv6_objects": {
+      "name": "Sync NPTv6 address objects",
+      "description": "Set two existing address objects to the /64 (slot ef) and /60 (slot f0) inside an ISP pool's currently delegated /56. Changes the candidate configuration on the active firewall; needs an admin role that can edit the configuration (and commit, if you ask for that).",
+      "fields": {
+        "pool": {
+          "name": "Pool",
+          "description": "The delegated-prefix pool (ISP) name, as in the pool's sensors, e.g. spectrum."
+        },
+        "object_64": {
+          "name": "/64 object",
+          "description": "Name of the address object to set to the /64."
+        },
+        "object_60": {
+          "name": "/60 object",
+          "description": "Name of the address object to set to the /60."
+        },
+        "vsys": {
+          "name": "Vsys",
+          "description": "The vsys holding the objects. Leave empty for shared objects."
+        },
+        "commit": {
+          "name": "Commit",
+          "description": "Commit afterwards (only this API user's changes). Off by default: the new prefix isn't live until you commit."
+        },
+        "config_entry_id": {
+          "name": "Firewall",
+          "description": "Only needed if more than one firewall or pair is configured."
+        }
+      }
     }
   },
   "selector": {

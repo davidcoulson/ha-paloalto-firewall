@@ -8,6 +8,7 @@ import time
 import xml.etree.ElementTree as ET
 from collections.abc import Callable
 from typing import Any
+from xml.sax.saxutils import escape
 
 import aiohttp
 
@@ -130,6 +131,55 @@ class PanOSClient:
         if vsys:
             data["vsys"] = vsys
         return await self._request(data, cmd, timeout)
+
+    @property
+    def username(self) -> str:
+        return self._username
+
+    async def config(
+        self, action: str, xpath: str, element: str | None = None, timeout: int = DEFAULT_TIMEOUT
+    ) -> ET.Element:
+        """Read (``get``) or change (``edit``) the candidate configuration.
+
+        Changes stay uncommitted until :meth:`commit`. ``element`` is the XML
+        that replaces the node at ``xpath`` for ``edit``.
+        """
+        data = {"type": "config", "action": action, "xpath": xpath}
+        if element is not None:
+            data["element"] = element
+        return await self._request(data, f"config:{action}", timeout)
+
+    async def commit(self, admin: str | None = None, timeout: int = 300) -> dict[str, Any]:
+        """Commit (only ``admin``'s changes if given) and wait for the job.
+
+        Returns {"job", "result", "details"}; job is None when there was
+        nothing to commit. Raises PanOSApiError if the commit job fails.
+        """
+        cmd = (
+            f"<commit><partial><admin><member>{escape(admin)}</member></admin></partial></commit>"
+            if admin
+            else "<commit></commit>"
+        )
+        started = await self._request({"type": "commit", "cmd": cmd}, "commit", timeout)
+        job = (started.findtext("job") or "").strip() or None
+        if job is None:
+            return {"job": None, "result": "OK", "details": (started.findtext("msg/line") or "").strip()}
+        try:
+            async with asyncio.timeout(timeout):
+                while True:
+                    result = await self.op(f"<show><jobs><id>{job}</id></jobs></show>", timeout=timeout)
+                    if (result.findtext("job/status") or "").strip() == "FIN":
+                        break
+                    await asyncio.sleep(LOG_POLL_SECONDS)
+        except TimeoutError as err:
+            raise PanOSConnectionError(
+                f"Commit job {job} on {self.host} still running after {timeout} s"
+            ) from err
+        outcome = (result.findtext("job/result") or "").strip()
+        details = "; ".join(line.text.strip() for line in result.findall("job/details/line") if line.text)
+        if outcome != "OK":
+            raise PanOSApiError(f"Commit job {job} on {self.host} finished {outcome or 'unknown'}: {details}")
+        return {"job": job, "result": outcome, "details": details}
 
     async def log_query(
         self, log_type: str, query: str, nlogs: int = 100, timeout: int = DEFAULT_TIMEOUT
