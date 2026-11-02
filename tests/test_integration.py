@@ -2148,3 +2148,16 @@ async def test_fib_parsing_and_egress_share_executor_job(hass: HomeAssistant, fa
     assert len(threads) > 1
     assert len(set(threads)) == 1
     assert threads[0] != main_thread
+
+
+async def test_stale_logical_router_device_removed(hass: HomeAssistant, fake) -> None:
+    from homeassistant.helpers import device_registry as dr
+
+    entry = await _setup(hass, fake)
+    devices = dr.async_get(hass)
+    stale = devices.async_get_or_create(
+        config_entry_id=entry.entry_id, identifiers={(DOMAIN, f"{entry.entry_id}_lr_gone-vr")}
+    )
+    assert await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert devices.async_get(stale.id) is None
