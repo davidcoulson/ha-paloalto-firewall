@@ -235,12 +235,7 @@ async def _async_setup_entry(hass: HomeAssistant, entry: PanOSConfigEntry, units
 
     entry.async_on_unload(async_at_started(hass, _start_slow_reads))
 
-    entry.async_on_unload(entry.add_update_listener(_async_options_updated))
     return True
-
-
-async def _async_options_updated(hass: HomeAssistant, entry: PanOSConfigEntry) -> None:
-    await hass.config_entries.async_reload(entry.entry_id)
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: PanOSConfigEntry) -> bool:
@@ -318,7 +313,7 @@ def _remove_stale_network_entities(hass: HomeAssistant, entry: PanOSConfigEntry)
                 if domain == DOMAIN and ident.startswith(lr_prefix) and ident not in current:
                     # Removes the device and every entity on it (egress, routes,
                     # BGP) - the logical router was deleted or renamed.
-                    devices.async_update_device(device.id, remove_config_entry_id=entry.entry_id)
+                    devices.async_remove_device(device.id)
                     break
     lr_keep = {
         f"{lr_prefix}{lr}_{suffix}" for lr in lrs for suffix in ("egress_ipv4", "egress_ipv6", "routes")
