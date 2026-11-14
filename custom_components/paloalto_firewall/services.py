@@ -756,7 +756,8 @@ async def _sync_nptv6(call: ServiceCall) -> ServiceResponse:
                     _LOGGER.warning("Could not restore %s after a failed NPTv6 sync", name)
             raise
         commit = None
-        if call.data["commit"] and any(c["changed"] for c in changes.values()):
+        # Also when nothing changed: a retry must commit edits a failed commit left in the candidate config.
+        if call.data["commit"]:
             commit = await unit.client.commit(unit.client.username)
     except PanOSAuthError as err:
         raise HomeAssistantError(f"Authentication failed: {err}") from err

@@ -1094,13 +1094,14 @@ async def test_sync_nptv6_objects(hass: HomeAssistant, fake) -> None:
     }
     assert fake.objects[shared.format("npt-60")] == "2001:db8:b00:f0::/60"
 
-    # Already aligned: nothing is edited, and nothing is committed even when asked.
+    # Already aligned: nothing is edited, but commit=True still commits (retry after a failed commit).
     edits = sum(c.endswith(":edit") for _, c in fake.calls)
     r = await hass.services.async_call(
         DOMAIN, "sync_nptv6_objects", {**call, "commit": True}, blocking=True, return_response=True
     )
-    assert not any(o["changed"] for o in r["objects"].values()) and r["committed"] is False
-    assert sum(c.endswith(":edit") for _, c in fake.calls) == edits and fake.commits == []
+    assert not any(o["changed"] for o in r["objects"].values()) and r["committed"] is True
+    assert sum(c.endswith(":edit") for _, c in fake.calls) == edits and len(fake.commits) == 1
+    fake.commits.clear()
 
     # A change with commit=True commits only this API user's changes and reports the job.
     fake.objects[shared.format("npt-60")] = "2001:db8:aaa:f0::/60"
