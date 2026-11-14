@@ -1126,6 +1126,9 @@ async def test_sync_nptv6_objects(hass: HomeAssistant, fake) -> None:
         )
     assert sum(c.endswith(":edit") for _, c in fake.calls) == edits
 
+    with pytest.raises(ServiceValidationError, match="must be different"):
+        await hass.services.async_call(DOMAIN, "sync_nptv6_objects", {**call, "object_60": "npt-64"}, blocking=True)
+
     # Failed commit job, unknown pool, missing object and a bad delegated prefix are all errors.
     fake.objects[shared.format("npt-60")] = "2001:db8:aaa:f0::/60"
     fake.commit_result = "FAIL"

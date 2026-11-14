@@ -716,6 +716,8 @@ async def _async_sync_nptv6(call: ServiceCall) -> ServiceResponse:
         known = ", ".join(sorted(pools)) or "none"
         raise ServiceValidationError(f"No delegated-prefix pool named {call.data['pool']!r} (known: {known})")
     target_64, target_60 = nptv6_targets(pool.get("prefix") or "")
+    if call.data["object_64"] == call.data["object_60"]:
+        raise ServiceValidationError("object_64 and object_60 must be different address objects")
     vsys = call.data.get("vsys")
     unit = _candidate_units(entry)[0]
     changes: dict[str, Any] = {}
