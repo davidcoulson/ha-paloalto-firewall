@@ -1139,7 +1139,9 @@ async def test_sync_nptv6_objects(hass: HomeAssistant, fake) -> None:
     assert sum(c.endswith(":edit") for _, c in fake.calls) == edits
 
     with pytest.raises(ServiceValidationError, match="must be different"):
-        await hass.services.async_call(DOMAIN, "sync_nptv6_objects", {**call, "object_60": "npt-64"}, blocking=True)
+        await hass.services.async_call(
+            DOMAIN, "sync_nptv6_objects", {**call, "object_60": "npt-64"}, blocking=True
+        )
 
     # Failed commit job, unknown pool, missing object and a bad delegated prefix are all errors.
     fake.objects[shared.format("npt-60")] = "2001:db8:aaa:f0::/60"
@@ -1174,7 +1176,9 @@ async def test_sync_nptv6_calls_are_serialized(hass: HomeAssistant, fake) -> Non
     call = {"pool": "wan-b", "object_64": "a", "object_60": "b"}
     lock = hass.data.setdefault(f"{DOMAIN}_nptv6_lock", asyncio.Lock())
     async with lock:
-        task = hass.async_create_task(hass.services.async_call(DOMAIN, "sync_nptv6_objects", call, blocking=True))
+        task = hass.async_create_task(
+            hass.services.async_call(DOMAIN, "sync_nptv6_objects", call, blocking=True)
+        )
         await asyncio.sleep(0.05)
         assert not task.done()  # waiting for the lock, not running (and not failed yet)
     with pytest.raises(Exception, match="wasn't found"):
