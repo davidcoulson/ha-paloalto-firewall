@@ -1157,6 +1157,18 @@ async def test_config_services_need_admin(hass: HomeAssistant, fake, hass_read_o
             )
 
 
+async def test_sync_nptv6_calls_are_serialized(hass: HomeAssistant, fake) -> None:
+    await _setup(hass, fake)
+    call = {"pool": "wan-b", "object_64": "a", "object_60": "b"}
+    lock = hass.data.setdefault(f"{DOMAIN}_nptv6_lock", asyncio.Lock())
+    async with lock:
+        task = hass.async_create_task(hass.services.async_call(DOMAIN, "sync_nptv6_objects", call, blocking=True))
+        await asyncio.sleep(0.05)
+        assert not task.done()  # waiting for the lock, not running (and not failed yet)
+    with pytest.raises(Exception, match="wasn't found"):
+        await task
+
+
 def test_nptv6_targets() -> None:
     from custom_components.paloalto_firewall.services import nptv6_targets
 

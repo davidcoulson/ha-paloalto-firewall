@@ -702,6 +702,12 @@ def _address_xpath(name: str, vsys: str | None) -> str:
 
 
 async def _async_sync_nptv6(call: ServiceCall) -> ServiceResponse:
+    """Run one sync at a time: a rollback must not undo another call's edits."""
+    async with call.hass.data.setdefault(f"{DOMAIN}_nptv6_lock", asyncio.Lock()):
+        return await _sync_nptv6(call)
+
+
+async def _sync_nptv6(call: ServiceCall) -> ServiceResponse:
     """Point two address objects at the /64 and /60 inside a pool's delegated /56.
 
     Edits the candidate config on the active unit (existing objects only, only
