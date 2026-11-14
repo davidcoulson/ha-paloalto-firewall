@@ -19,6 +19,7 @@ from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant, ServiceCall, ServiceResponse, SupportsResponse
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers.service import async_register_admin_service
 from homeassistant.util import dt as dt_util
 
 from . import parsers
@@ -805,14 +806,16 @@ async def _async_check_updates(call: ServiceCall) -> ServiceResponse:
 
 
 def async_setup_services(hass: HomeAssistant) -> None:
-    hass.services.async_register(
+    async_register_admin_service(
+        hass,
         DOMAIN,
         SERVICE_SYNC_NPTV6,
         _async_sync_nptv6,
         schema=SYNC_NPTV6_SCHEMA,  # type: ignore[arg-type]  # HA types schemas as probatio
         supports_response=SupportsResponse.OPTIONAL,
     )
-    hass.services.async_register(
+    async_register_admin_service(
+        hass,
         DOMAIN,
         SERVICE_BACKUP_CONFIG,
         _async_backup_config,

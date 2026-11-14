@@ -1139,6 +1139,21 @@ async def test_sync_nptv6_objects(hass: HomeAssistant, fake) -> None:
         )
 
 
+async def test_config_services_need_admin(hass: HomeAssistant, fake, hass_read_only_user) -> None:
+    from homeassistant.core import Context
+    from homeassistant.exceptions import Unauthorized
+
+    await _setup(hass, fake)
+    for service, data in (
+        ("sync_nptv6_objects", {"pool": "wan-b", "object_64": "a", "object_60": "b"}),
+        ("backup_config", {}),
+    ):
+        with pytest.raises(Unauthorized):
+            await hass.services.async_call(
+                DOMAIN, service, data, blocking=True, context=Context(user_id=hass_read_only_user.id)
+            )
+
+
 def test_nptv6_targets() -> None:
     from custom_components.paloalto_firewall.services import nptv6_targets
 
