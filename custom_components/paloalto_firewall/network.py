@@ -536,7 +536,8 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             prefix_pools = self._slow.get("prefix_pools", {}) if same_unit else {}
         bgp_ok = bgp is not None
         if bgp is None:
-            bgp = self._slow.get("bgp", {}) if same_unit else {}
+            # Keep the routers (so entities stay) but mark them unreadable, not still established.
+            bgp = {lr: {**i, "ok": False} for lr, i in self._slow.get("bgp", {}).items()} if same_unit else {}
         self._slow = {
             "unit_serial": unit.config.serial,
             "bgp_ok": bgp_ok,

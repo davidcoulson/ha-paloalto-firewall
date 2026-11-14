@@ -596,6 +596,17 @@ async def test_bgp_peers(hass: HomeAssistant, fake, freezer) -> None:
         ("dns-anycast-0", False, "Active")
     ]
 
+    # A failed summary read makes the peers unavailable instead of keeping them established.
+    from custom_components.paloalto_firewall.const import CMD_BGP_SUMMARY
+
+    fake.fail[CMD_BGP_SUMMARY] = "error"
+    await _tick(hass, freezer, 301)
+    assert st("binary_sensor.core_vr_bgp_dns_anycast_0").state == "unavailable"
+    assert st("sensor.core_vr_bgp_peers_established").state == "unavailable"
+    del fake.fail[CMD_BGP_SUMMARY]
+    await _tick(hass, freezer, 301)
+    assert st("binary_sensor.core_vr_bgp_dns_anycast_0").state == "off"
+
     # A peer that disappears from the config is cleaned up on reload.
     reg = er.async_get(hass)
     stale = reg.async_get_or_create(
