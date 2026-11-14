@@ -19,6 +19,7 @@ from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant, ServiceCall, ServiceResponse, SupportsResponse
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers.service import async_register_admin_service
 from homeassistant.util import dt as dt_util
 
 from . import parsers
@@ -701,6 +702,12 @@ def _address_xpath(name: str, vsys: str | None) -> str:
 
 
 async def _async_sync_nptv6(call: ServiceCall) -> ServiceResponse:
+    """Run one sync at a time: a rollback must not undo another call's edits."""
+    async with call.hass.data.setdefault(f"{DOMAIN}_nptv6_lock", asyncio.Lock()):
+        return await _sync_nptv6(call)
+
+
+async def _sync_nptv6(call: ServiceCall) -> ServiceResponse:
     """Point two address objects at the /64 and /60 inside a pool's delegated /56.
 
     Edits the candidate config on the active unit (existing objects only, only
@@ -715,6 +722,8 @@ async def _async_sync_nptv6(call: ServiceCall) -> ServiceResponse:
         known = ", ".join(sorted(pools)) or "none"
         raise ServiceValidationError(f"No delegated-prefix pool named {call.data['pool']!r} (known: {known})")
     target_64, target_60 = nptv6_targets(pool.get("prefix") or "")
+    if call.data["object_64"] == call.data["object_60"]:
+        raise ServiceValidationError("object_64 and object_60 must be different address objects")
     vsys = call.data.get("vsys")
     unit = _candidate_units(entry)[0]
     changes: dict[str, Any] = {}
@@ -747,7 +756,8 @@ async def _async_sync_nptv6(call: ServiceCall) -> ServiceResponse:
                     _LOGGER.warning("Could not restore %s after a failed NPTv6 sync", name)
             raise
         commit = None
-        if call.data["commit"] and any(c["changed"] for c in changes.values()):
+        # Also when nothing changed: a retry must commit edits a failed commit left in the candidate config.
+        if call.data["commit"]:
             commit = await unit.client.commit(unit.client.username)
     except PanOSAuthError as err:
         raise HomeAssistantError(f"Authentication failed: {err}") from err
@@ -805,14 +815,16 @@ async def _async_check_updates(call: ServiceCall) -> ServiceResponse:
 
 
 def async_setup_services(hass: HomeAssistant) -> None:
-    hass.services.async_register(
+    async_register_admin_service(
+        hass,
         DOMAIN,
         SERVICE_SYNC_NPTV6,
         _async_sync_nptv6,
         schema=SYNC_NPTV6_SCHEMA,  # type: ignore[arg-type]  # HA types schemas as probatio
         supports_response=SupportsResponse.OPTIONAL,
     )
-    hass.services.async_register(
+    async_register_admin_service(
+        hass,
         DOMAIN,
         SERVICE_BACKUP_CONFIG,
         _async_backup_config,

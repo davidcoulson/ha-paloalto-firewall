@@ -596,6 +596,17 @@ async def test_bgp_peers(hass: HomeAssistant, fake, freezer) -> None:
         ("dns-anycast-0", False, "Active")
     ]
 
+    # A failed summary read makes the peers unavailable instead of keeping them established.
+    from custom_components.paloalto_firewall.const import CMD_BGP_SUMMARY
+
+    fake.fail[CMD_BGP_SUMMARY] = "error"
+    await _tick(hass, freezer, 301)
+    assert st("binary_sensor.core_vr_bgp_dns_anycast_0").state == "unavailable"
+    assert st("sensor.core_vr_bgp_peers_established").state == "unavailable"
+    del fake.fail[CMD_BGP_SUMMARY]
+    await _tick(hass, freezer, 301)
+    assert st("binary_sensor.core_vr_bgp_dns_anycast_0").state == "off"
+
     # A peer that disappears from the config is cleaned up on reload.
     reg = er.async_get(hass)
     stale = reg.async_get_or_create(
@@ -1094,13 +1105,14 @@ async def test_sync_nptv6_objects(hass: HomeAssistant, fake) -> None:
     }
     assert fake.objects[shared.format("npt-60")] == "2001:db8:b00:f0::/60"
 
-    # Already aligned: nothing is edited, and nothing is committed even when asked.
+    # Already aligned: nothing is edited, but commit=True still commits (retry after a failed commit).
     edits = sum(c.endswith(":edit") for _, c in fake.calls)
     r = await hass.services.async_call(
         DOMAIN, "sync_nptv6_objects", {**call, "commit": True}, blocking=True, return_response=True
     )
-    assert not any(o["changed"] for o in r["objects"].values()) and r["committed"] is False
-    assert sum(c.endswith(":edit") for _, c in fake.calls) == edits and fake.commits == []
+    assert not any(o["changed"] for o in r["objects"].values()) and r["committed"] is True
+    assert sum(c.endswith(":edit") for _, c in fake.calls) == edits and len(fake.commits) == 1
+    fake.commits.clear()
 
     # A change with commit=True commits only this API user's changes and reports the job.
     fake.objects[shared.format("npt-60")] = "2001:db8:aaa:f0::/60"
@@ -1126,6 +1138,11 @@ async def test_sync_nptv6_objects(hass: HomeAssistant, fake) -> None:
         )
     assert sum(c.endswith(":edit") for _, c in fake.calls) == edits
 
+    with pytest.raises(ServiceValidationError, match="must be different"):
+        await hass.services.async_call(
+            DOMAIN, "sync_nptv6_objects", {**call, "object_60": "npt-64"}, blocking=True
+        )
+
     # Failed commit job, unknown pool, missing object and a bad delegated prefix are all errors.
     fake.objects[shared.format("npt-60")] = "2001:db8:aaa:f0::/60"
     fake.commit_result = "FAIL"
@@ -1137,6 +1154,35 @@ async def test_sync_nptv6_objects(hass: HomeAssistant, fake) -> None:
         await hass.services.async_call(
             DOMAIN, "sync_nptv6_objects", {**call, "object_64": "missing"}, blocking=True
         )
+
+
+async def test_config_services_need_admin(hass: HomeAssistant, fake, hass_read_only_user) -> None:
+    from homeassistant.core import Context
+    from homeassistant.exceptions import Unauthorized
+
+    await _setup(hass, fake)
+    for service, data in (
+        ("sync_nptv6_objects", {"pool": "wan-b", "object_64": "a", "object_60": "b"}),
+        ("backup_config", {}),
+    ):
+        with pytest.raises(Unauthorized):
+            await hass.services.async_call(
+                DOMAIN, service, data, blocking=True, context=Context(user_id=hass_read_only_user.id)
+            )
+
+
+async def test_sync_nptv6_calls_are_serialized(hass: HomeAssistant, fake) -> None:
+    await _setup(hass, fake)
+    call = {"pool": "wan-b", "object_64": "a", "object_60": "b"}
+    lock = hass.data.setdefault(f"{DOMAIN}_nptv6_lock", asyncio.Lock())
+    async with lock:
+        task = hass.async_create_task(
+            hass.services.async_call(DOMAIN, "sync_nptv6_objects", call, blocking=True)
+        )
+        await asyncio.sleep(0.05)
+        assert not task.done()  # waiting for the lock, not running (and not failed yet)
+    with pytest.raises(Exception, match="wasn't found"):
+        await task
 
 
 def test_nptv6_targets() -> None:
