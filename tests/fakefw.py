@@ -677,6 +677,8 @@ class FakePair:
             raise PanOSConnectionError(f"{host} down")
         if self.fail.get("log:threat") == "403":
             return ROLE_REFUSED.format("log"), 403
+        if self.fail.get("log:threat") == "bare403":
+            return "Forbidden", 403
         if self.fail.get("log:threat") == "16":
             return (
                 '<response status="error" code="16"><msg><line>Unauthorized request</line></msg></response>',

@@ -1471,6 +1471,16 @@ async def test_threat_unauthorized_code_16(hass: HomeAssistant, fake) -> None:
     assert ir.async_get(hass).async_get_issue(DOMAIN, f"{entry.entry_id}_permission_threat_log") is not None
 
 
+async def test_threat_bare_403_is_not_a_permission_issue(hass: HomeAssistant, fake) -> None:
+    """A 403 with no role message (e.g. a transient key problem) must not switch threats off."""
+    from homeassistant.helpers import issue_registry as ir
+
+    fake.fail["log:threat"] = "bare403"
+    entry = await _setup(hass, fake)
+    assert ir.async_get(hass).async_get_issue(DOMAIN, f"{entry.entry_id}_permission_threat_log") is None
+    assert entry.runtime_data.threats.update_interval is not None
+
+
 async def test_stop_cancels_requests_in_flight(hass: HomeAssistant, fake) -> None:
     from homeassistant.const import EVENT_HOMEASSISTANT_STOP
 

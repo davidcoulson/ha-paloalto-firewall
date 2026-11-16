@@ -150,8 +150,10 @@ class PanOSThreatCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         except PanOSAuthError as err:
             raise ConfigEntryAuthFailed(str(err)) from err
         except PanOSApiError as err:
-            # 403: "not authorized for user role"; 16: "Unauthorized request".
-            if err.code in ("403", "16"):
+            # "not authorized for user role" (403) or code 16 "Unauthorized request" is the
+            # role. A bare 403 after a key regeneration (api._request) may be transient:
+            # let it fail and retry rather than switching threat polling off for good.
+            if err.code == "16" or "not authorized for user role" in str(err).lower():
                 # Not an outage: report it once (warning + repair) rather
                 # than as a failed update on every start.
                 self._permission_denied(unit.config.hostname)
