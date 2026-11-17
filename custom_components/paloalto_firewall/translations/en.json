@@ -333,6 +333,10 @@
           "name": "/60 object",
           "description": "Name of the address object to set to the /60."
         },
+        "object_56": {
+          "name": "/56 object",
+          "description": "Optional: name of an address object to set to the delegated /56 itself."
+        },
         "vsys": {
           "name": "Vsys",
           "description": "The vsys holding the objects. Leave empty for shared objects."

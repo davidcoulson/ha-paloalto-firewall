@@ -664,6 +664,7 @@ SYNC_NPTV6_SCHEMA = vol.Schema(
         vol.Required("pool"): cv.string,
         vol.Required("object_64"): cv.string,
         vol.Required("object_60"): cv.string,
+        vol.Optional("object_56"): cv.string,
         vol.Optional("vsys"): cv.string,
         vol.Optional("commit", default=False): cv.boolean,
     }
@@ -722,15 +723,18 @@ async def _sync_nptv6(call: ServiceCall) -> ServiceResponse:
         known = ", ".join(sorted(pools)) or "none"
         raise ServiceValidationError(f"No delegated-prefix pool named {call.data['pool']!r} (known: {known})")
     target_64, target_60 = nptv6_targets(pool.get("prefix") or "")
-    if call.data["object_64"] == call.data["object_60"]:
-        raise ServiceValidationError("object_64 and object_60 must be different address objects")
+    targets = [(call.data["object_64"], target_64), (call.data["object_60"], target_60)]
+    if call.data.get("object_56"):  # the delegated /56 itself, for policies that match the whole prefix
+        targets.append((call.data["object_56"], str(ipaddress.ip_network(pool["prefix"], strict=False))))
+    if len({name for name, _ in targets}) != len(targets):
+        raise ServiceValidationError("object_64, object_60 and object_56 must be different address objects")
     vsys = call.data.get("vsys")
     unit = _candidate_units(entry)[0]
     changes: dict[str, Any] = {}
     xpaths: dict[str, str] = {}
     try:
         # Read every object first so a missing one fails before anything is edited.
-        for name, target in ((call.data["object_64"], target_64), (call.data["object_60"], target_60)):
+        for name, target in targets:
             xpaths[name] = _address_xpath(name, vsys)
             current = (await unit.client.config("get", xpaths[name])).findtext("ip-netmask")
             if current is None:

@@ -1156,6 +1156,30 @@ async def test_sync_nptv6_objects(hass: HomeAssistant, fake) -> None:
         )
 
 
+async def test_sync_nptv6_objects_with_slash_56(hass: HomeAssistant, fake) -> None:
+    from homeassistant.exceptions import ServiceValidationError
+
+    shared = "/config/shared/address/entry[@name='{}']/ip-netmask"
+    fake.objects = {
+        shared.format("npt-64"): "2001:db8:aaa:ef::/64",
+        shared.format("npt-60"): "2001:db8:aaa:f0::/60",
+        shared.format("all-56"): "2001:db8:aaa::/56",
+    }
+    await _setup(hass, fake)  # wan-b's delegated prefix is 2001:db8:b00::/56
+    call = {"pool": "wan-b", "object_64": "npt-64", "object_60": "npt-60", "object_56": "all-56"}
+
+    r = await hass.services.async_call(
+        DOMAIN, "sync_nptv6_objects", call, blocking=True, return_response=True
+    )
+    assert r["objects"]["all-56"] == {"previous": "2001:db8:aaa::/56", "new": "2001:db8:b00::/56", "changed": True}
+    assert fake.objects[shared.format("all-56")] == "2001:db8:b00::/56"
+
+    with pytest.raises(ServiceValidationError, match="must be different"):
+        await hass.services.async_call(
+            DOMAIN, "sync_nptv6_objects", {**call, "object_56": "npt-64"}, blocking=True
+        )
+
+
 async def test_config_services_need_admin(hass: HomeAssistant, fake, hass_read_only_user) -> None:
     from homeassistant.core import Context
     from homeassistant.exceptions import Unauthorized
