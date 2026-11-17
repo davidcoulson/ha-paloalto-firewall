@@ -93,6 +93,7 @@ PROBE_IPV6 = "2606:4700:4700::1111"
 SERVICE_CHECK_UPDATES = "check_for_updates"
 SERVICE_BACKUP_CONFIG = "backup_config"
 SERVICE_SYNC_NPTV6 = "sync_nptv6_objects"
+SERVICE_COMMIT_JOB_STATUS = "commit_job_status"
 BACKUP_DIR = "paloalto_firewall_backups"
 BACKUP_KEEP = 30
 LICENCE_WARN_DAYS = 30

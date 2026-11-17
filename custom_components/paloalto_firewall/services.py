@@ -39,6 +39,7 @@ from .const import (
     LOOKUP_TIMEOUT,
     SERVICE_BACKUP_CONFIG,
     SERVICE_CHECK_UPDATES,
+    SERVICE_COMMIT_JOB_STATUS,
     SERVICE_LOOKUP,
     SERVICE_ROUTE_LOOKUP,
     SERVICE_SESSION_LOOKUP,
@@ -667,6 +668,15 @@ SYNC_NPTV6_SCHEMA = vol.Schema(
         vol.Optional("object_56"): cv.string,
         vol.Optional("vsys"): cv.string,
         vol.Optional("commit", default=False): cv.boolean,
+        # False: return the commit job id at once instead of waiting (a commit can take minutes).
+        vol.Optional("wait", default=True): cv.boolean,
+    }
+)
+
+JOB_STATUS_SCHEMA = vol.Schema(
+    {
+        vol.Optional(ATTR_CONFIG_ENTRY_ID): cv.string,
+        vol.Required("job"): vol.All(vol.Coerce(int), vol.Range(min=1)),
     }
 )
 
@@ -762,7 +772,7 @@ async def _sync_nptv6(call: ServiceCall) -> ServiceResponse:
         commit = None
         # Also when nothing changed: a retry must commit edits a failed commit left in the candidate config.
         if call.data["commit"]:
-            commit = await unit.client.commit(unit.client.username)
+            commit = await unit.client.commit(unit.client.username, wait=call.data["wait"])
     except PanOSAuthError as err:
         raise HomeAssistantError(f"Authentication failed: {err}") from err
     except PanOSError as err:
@@ -782,6 +792,28 @@ async def _sync_nptv6(call: ServiceCall) -> ServiceResponse:
         if call.return_response
         else None
     )
+
+
+async def _async_commit_job_status(call: ServiceCall) -> ServiceResponse:
+    """Status of a commit job on the active unit, e.g. one sync_nptv6_objects started with wait: false."""
+    unit = _candidate_units(_get_entry(call.hass, call.data.get(ATTR_CONFIG_ENTRY_ID)))[0]
+    job = call.data["job"]
+    try:
+        result = await unit.client.op(f"<show><jobs><id>{job}</id></jobs></show>")
+    except PanOSAuthError as err:
+        raise HomeAssistantError(f"Authentication failed: {err}") from err
+    except PanOSError as err:
+        raise HomeAssistantError(f"Could not read job {job} on {unit.config.hostname}: {err}") from err
+    if result.find("job") is None:
+        raise ServiceValidationError(f"Job {job} wasn't found on {unit.config.hostname}")
+    return {
+        "firewall": unit.config.hostname,
+        "job": str(job),
+        "status": (result.findtext("job/status") or "").strip(),  # ACT, PEND or FIN
+        "result": (result.findtext("job/result") or "").strip(),  # OK or FAIL once FIN
+        "progress": (result.findtext("job/progress") or "").strip(),
+        "details": "; ".join(x.text.strip() for x in result.findall("job/details/line") if x.text),
+    }
 
 
 async def _async_check_updates(call: ServiceCall) -> ServiceResponse:
@@ -826,6 +858,13 @@ def async_setup_services(hass: HomeAssistant) -> None:
         _async_sync_nptv6,
         schema=SYNC_NPTV6_SCHEMA,  # type: ignore[arg-type]  # HA types schemas as probatio
         supports_response=SupportsResponse.OPTIONAL,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_COMMIT_JOB_STATUS,
+        _async_commit_job_status,
+        schema=JOB_STATUS_SCHEMA,  # type: ignore[arg-type]  # HA types schemas as probatio
+        supports_response=SupportsResponse.ONLY,
     )
     async_register_admin_service(
         hass,

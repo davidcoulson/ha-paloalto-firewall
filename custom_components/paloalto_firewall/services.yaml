@@ -279,6 +279,24 @@ sync_nptv6_objects:
       default: false
       selector:
         boolean:
+    wait:
+      default: true
+      selector:
+        boolean:
+    config_entry_id:
+      selector:
+        config_entry:
+          integration: paloalto_firewall
+
+commit_job_status:
+  fields:
+    job:
+      required: true
+      example: 77
+      selector:
+        number:
+          min: 1
+          mode: box
     config_entry_id:
       selector:
         config_entry:

@@ -149,11 +149,13 @@ class PanOSClient:
             data["element"] = element
         return await self._request(data, f"config:{action}", timeout)
 
-    async def commit(self, admin: str | None = None, timeout: int = 300) -> dict[str, Any]:
+    async def commit(self, admin: str | None = None, timeout: int = 300, wait: bool = True) -> dict[str, Any]:
         """Commit (only ``admin``'s changes if given) and wait for the job.
 
         Returns {"job", "result", "details"}; job is None when there was
         nothing to commit. Raises PanOSApiError if the commit job fails.
+        With ``wait=False`` it returns as soon as the job is queued, with
+        result "PEND": the caller checks the job itself.
         """
         cmd = (
             f"<commit><partial><admin><member>{escape(admin)}</member></admin></partial></commit>"
@@ -164,6 +166,8 @@ class PanOSClient:
         job = (started.findtext("job") or "").strip() or None
         if job is None:
             return {"job": None, "result": "OK", "details": (started.findtext("msg/line") or "").strip()}
+        if not wait:
+            return {"job": job, "result": "PEND", "details": (started.findtext("msg/line") or "").strip()}
         try:
             async with asyncio.timeout(timeout):
                 while True:

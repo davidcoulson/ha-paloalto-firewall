@@ -319,7 +319,7 @@
     },
     "sync_nptv6_objects": {
       "name": "Sync NPTv6 address objects",
-      "description": "Set two existing address objects to the /64 (slot ef) and /60 (slot f0) inside an ISP pool's currently delegated /56. Changes the candidate configuration on the active firewall; needs an admin role that can edit the configuration (and commit, if you ask for that).",
+      "description": "Set two existing address objects to the /64 (slot ef) and /60 (slot f0) inside an ISP pool's currently delegated /56. Changes the candidate configuration on the active firewall; needs an admin role that can edit the configuration (and commit, if you ask for that). With commit on, wait off returns the commit job id immediately.",
       "fields": {
         "pool": {
           "name": "Pool",
@@ -344,6 +344,24 @@
         "commit": {
           "name": "Commit",
           "description": "Commit afterwards (only this API user's changes). Off by default: the new prefix isn't live until you commit."
+        },
+        "config_entry_id": {
+          "name": "Firewall",
+          "description": "Only needed if more than one firewall or pair is configured."
+        },
+        "wait": {
+          "name": "Wait for commit",
+          "description": "On (default) the call returns when the commit job finishes, which can take minutes. Off returns the commit job id straight away; check it with Commit job status."
+        }
+      }
+    },
+    "commit_job_status": {
+      "name": "Commit job status",
+      "description": "Status of a commit job on the active firewall: ACT or PEND while it runs, FIN when done, with result OK or FAIL and the job's details.",
+      "fields": {
+        "job": {
+          "name": "Job",
+          "description": "The job id, e.g. from Sync NPTv6 address objects with Wait for commit off."
         },
         "config_entry_id": {
           "name": "Firewall",

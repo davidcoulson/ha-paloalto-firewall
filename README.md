@@ -245,6 +245,8 @@ data:
   commit: true
 ```
 
+A commit can take a few minutes on the firewall, so `commit: true` waits for it by default. Pass `wait: false` to get the commit job id back straight away (`commit.job`, result `PEND`), then check it with `paloalto_firewall.commit_job_status` (`job: 77`), which returns `status` (`ACT`/`PEND`, then `FIN`), `result` (`OK` or `FAIL` once finished) and the job's `details`.
+
 Pass `object_56` as well to set another existing object to the delegated /56 itself (for policies that match the whole prefix).
 
 It only edits the `ip-netmask` of objects that already exist (shared ones unless you pass `vsys`), on the active firewall, and skips any that already match. With `commit: true` it commits only this API user's changes and waits for the job, and nothing is committed when nothing changed; without it the change sits in the candidate config until you commit. Unlike the rest of the integration this needs an admin role that can edit (and commit) the configuration, not just the read-only operational API. Run it from the prefix-change automation:

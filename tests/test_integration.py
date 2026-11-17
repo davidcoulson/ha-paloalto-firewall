@@ -1180,6 +1180,27 @@ async def test_sync_nptv6_objects_with_slash_56(hass: HomeAssistant, fake) -> No
         )
 
 
+async def test_sync_nptv6_commit_without_waiting(hass: HomeAssistant, fake) -> None:
+    shared = "/config/shared/address/entry[@name='{}']/ip-netmask"
+    fake.objects = {shared.format("npt-64"): "2001:db8:aaa:ef::/64", shared.format("npt-60"): "2001:db8:aaa:f0::/60"}
+    await _setup(hass, fake)
+    call = {"pool": "wan-b", "object_64": "npt-64", "object_60": "npt-60", "commit": True, "wait": False}
+
+    jobs_polled = sum(c.startswith("<show><jobs>") for _, c in fake.calls)
+    r = await hass.services.async_call(
+        DOMAIN, "sync_nptv6_objects", call, blocking=True, return_response=True
+    )
+    # Returns the queued job at once, without polling it.
+    assert r["committed"] is True and r["commit"]["job"] == "77" and r["commit"]["result"] == "PEND"
+    assert sum(c.startswith("<show><jobs>") for _, c in fake.calls) == jobs_polled
+
+    status = await hass.services.async_call(
+        DOMAIN, "commit_job_status", {"job": 77}, blocking=True, return_response=True
+    )
+    assert status["job"] == "77" and status["status"] == "FIN" and status["result"] == "OK"
+    assert status["details"] == "Configuration committed successfully"
+
+
 async def test_config_services_need_admin(hass: HomeAssistant, fake, hass_read_only_user) -> None:
     from homeassistant.core import Context
     from homeassistant.exceptions import Unauthorized
