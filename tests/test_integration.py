@@ -553,6 +553,19 @@ async def test_prefix_pools_and_npt_mismatch(hass: HomeAssistant, fake, freezer)
     assert st("binary_sensor.edge_ha_pair_wan_b_nptv6_prefix_mismatch").state == "on"
 
 
+async def test_prefix_change_while_ha_was_down_still_fires(hass: HomeAssistant, fake, freezer) -> None:
+    entry = await _setup(hass, fake)
+    await _tick(hass, freezer, 301)  # let the baseline be written
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    fake.wan_b_prefix = "2001:db8:d00::/56"
+    events = async_capture_events(hass, "paloalto_firewall_prefix_change")
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert [(e.data["pool"], e.data["previous_prefix"], e.data["prefix"]) for e in events] == [
+        ("wan-b", "2001:db8:b00::/56", "2001:db8:d00::/56")
+    ]
+
+
 async def test_stale_path_monitor_entities_removed(hass: HomeAssistant, fake) -> None:
     from homeassistant.helpers import entity_registry as er
 

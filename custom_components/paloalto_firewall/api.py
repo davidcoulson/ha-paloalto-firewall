@@ -19,6 +19,8 @@ LOG_POLL_SECONDS = 1
 LARGE_RESPONSE = 200_000
 LOG_FINISH_TIMEOUT = 10
 FORBIDDEN_TTL = 6 * 3600
+KEYGEN_COOLDOWN = 60  # a firewall that keeps rejecting fresh keys must not be hit with a keygen per request
+SLOT_WAIT = 120  # longest a request waits for one of the two request slots
 
 
 class PanOSError(Exception):
@@ -86,6 +88,7 @@ class PanOSClient:
         # Small boxes (PA-4xx) have weak management planes; don't hammer them.
         self._sem = asyncio.Semaphore(2)
         self._key_lock = asyncio.Lock()
+        self._keygen_at = -KEYGEN_COOLDOWN
         # Request kinds the admin role was shown not to allow -> when; retried
         # with a fresh key once the verdict is old.
         self._forbidden: dict[str, float] = {}
@@ -110,6 +113,7 @@ class PanOSClient:
         async with self._key_lock:
             if self.api_key and self.api_key != stale_key:
                 return self.api_key
+            self._keygen_at = time.monotonic()
             result = await self._post(
                 {"type": "keygen", "user": self._username, "password": self._password},
                 with_key=False,
@@ -250,6 +254,8 @@ class PanOSClient:
                 raise PanOSApiError(f"Not permitted for this admin role: {err}", "403") from err
             # API keys can expire (PAN-OS 10.2+ key lifetime) or be rotated by
             # a master-key change; regenerate once with the stored password.
+            if time.monotonic() - self._keygen_at < KEYGEN_COOLDOWN:
+                raise PanOSApiError(f"Not permitted for this admin role: {err}", "403") from err
             _LOGGER.debug("API key rejected by %s, regenerating", self.host)
             await self.generate_key(used_key)
         try:
@@ -288,7 +294,12 @@ class PanOSClient:
         return parse_response(text)
 
     async def _send(self, data: dict[str, str], headers: dict[str, str], timeout: int) -> tuple[str, int]:
-        async with self._sem:
+        try:
+            async with asyncio.timeout(SLOT_WAIT):
+                await self._sem.acquire()
+        except TimeoutError as err:
+            raise PanOSConnectionError(f"{self.host}: timed out waiting for a free request slot") from err
+        try:
             try:
                 async with self._session.post(
                     self._url,
@@ -303,4 +314,6 @@ class PanOSClient:
                 raise PanOSConnectionError(
                     f"Error talking to {self.host}: {err or type(err).__name__}"
                 ) from err
+        finally:
+            self._sem.release()
         return text, status

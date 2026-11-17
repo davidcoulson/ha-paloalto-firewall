@@ -1375,9 +1375,12 @@ def parse_default_routes(result: ET.Element) -> dict[str, dict[str, Any]]:
             uptime = selected.get("uptime")
             if uptime is not None and not isinstance(uptime, str):
                 raise ValueError("Expected route uptime to be a string")
+            distance = selected.get("distance")
+            if distance is not None:
+                distance = int(distance)  # ValueError/TypeError on junk: rejected before it reaches route tracking
             out.setdefault(lr, {})[family] = {
                 "protocol": selected.get("protocol"),
-                "distance": selected.get("distance"),
+                "distance": distance,
                 "metric": selected.get("metric"),
                 "nexthop": hop.get("ip"),
                 "interface": hop.get("interfaceName"),

@@ -199,6 +199,7 @@ def test_gp_session_bad_timestamps():
         (parsers.parse_default_routes, '{"core-vr":{"0.0.0.0/0":[1]}}'),
         (parsers.parse_default_routes, '{"core-vr":{"0.0.0.0/0":[{"selected":true,"nexthops":[1]}]}}'),
         (parsers.parse_default_routes, '{"core-vr":{"0.0.0.0/0":[{"selected":true,"uptime":1}]}}'),
+        (parsers.parse_default_routes, '{"core-vr":{"0.0.0.0/0":[{"selected":true,"distance":"abc"}]}}'),
     ],
 )
 def test_malformed_optional_json_raises_value_error(parser, payload):

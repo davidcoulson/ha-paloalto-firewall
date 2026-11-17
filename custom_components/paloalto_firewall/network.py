@@ -17,6 +17,7 @@ from xml.sax.saxutils import escape
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.device_registry import DeviceInfo
+from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
 
@@ -264,6 +265,9 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         self._prev_counters: dict[str, tuple[float, dict[str, Any]]] = {}
         self._prev_egress: dict[tuple[str, int], str | None] = {}
         self._prev_prefix: dict[str, str | None] = {}
+        # Last seen prefixes survive a restart, so a change while HA was down still fires the event.
+        self._prefix_store: Store[dict[str, Any]] = Store(hass, 1, f"{DOMAIN}_prefixes_{entry.entry_id}")
+        self._stored_prefixes: dict[str, Any] | None = None
         self._prev_bgp: dict[tuple[str, str], bool] = {}
         self._warned: set[str] = set()
         # Slow tier: jobs, pending changes, prefixes/NAT and BGP change rarely
@@ -291,10 +295,10 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             return parser(result)
         except PanOSAuthError as err:
             raise ConfigEntryAuthFailed(str(err)) from err
-        except (PanOSError, ValueError) as err:
+        except Exception as err:  # noqa: BLE001 - one odd optional read (e.g. a bad certificate) must not fail the poll
             if key not in self._warned:
                 self._warned.add(key)
-                _LOGGER.debug("%s: '%s' unavailable: %s", unit.config.host, key, err)
+                _LOGGER.debug("%s: '%s' unavailable: %r", unit.config.host, key, err)
             return None
 
     def selected_interfaces(self, data: dict[str, Any]) -> list[str]:
@@ -316,6 +320,8 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
 
     async def _async_update_data(self) -> dict[str, Any]:
         unit = pick_unit(self.config_entry)
+        if self._stored_prefixes is None:
+            self._stored_prefixes = await self._prefix_store.async_load() or {}
         if unit.config.serial != self.unit_serial:
             # Different box (failover): counters aren't comparable.
             self._prev_counters.clear()
@@ -641,8 +647,16 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
         return out
 
     def _fire_prefix_events(self, pools: dict[str, dict[str, Any]]) -> None:
-        for name, pool in pools.items():
-            prefix = pool.get("prefix")
+        stored = self._stored_prefixes or {}
+        if stored.get("serial") == self.unit_serial:
+            # First look after a start: compare with what we saw before the restart.
+            self._prev_prefix = {**stored.get("prefixes", {}), **self._prev_prefix}
+        self._stored_prefixes = {}
+        before = dict(self._prev_prefix)
+        current = {name: pool.get("prefix") for name, pool in pools.items()}
+        # A pool that disappeared is a change too (prefix None), as is its return.
+        for name in self._prev_prefix.keys() | current.keys():
+            prefix = current.get(name)
             if name in self._prev_prefix and self._prev_prefix[name] != prefix:
                 _LOGGER.warning(
                     "Delegated prefix for %s changed: %s -> %s", name, self._prev_prefix[name], prefix
@@ -652,12 +666,16 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
                     {
                         "entry_id": self.config_entry.entry_id,
                         "pool": name,
-                        "interface": pool.get("interface"),
+                        "interface": (pools.get(name) or {}).get("interface"),
                         "previous_prefix": self._prev_prefix[name],
                         "prefix": prefix,
                     },
                 )
             self._prev_prefix[name] = prefix
+        if self._prev_prefix != before or not stored:
+            self._prefix_store.async_delay_save(
+                lambda: {"serial": self.unit_serial, "prefixes": dict(self._prev_prefix)}, 1
+            )
 
     @staticmethod
     def _group_path_monitors(

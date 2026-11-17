@@ -149,7 +149,7 @@ For each DHCPv6 prefix-delegation pool (e.g. one per ISP), on the pair device:
 | *pool* delegated prefix | the prefix the ISP currently delegates; interface, vsys, lease, lifetimes and inherited interface addresses as attributes |
 | *pool* NPTv6 prefix mismatch | **on** when an NPTv6 rule in that WAN's vsys translates outside the delegated prefix, or translates to a single /128 interface address (interface-address Dynamic IP with no inherited prefix). `problems` lists the offending rules |
 
-`paloalto_firewall_prefix_change` fires with `pool`, `interface`, `previous_prefix` and `prefix` when an ISP hands out a new prefix, so you can get notified before IPv6 breaks:
+`paloalto_firewall_prefix_change` fires with `pool`, `interface`, `previous_prefix` and `prefix` when an ISP hands out a new prefix (also if it changed while Home Assistant was down; `prefix` is empty if the pool disappeared, so check it before syncing), so you can get notified before IPv6 breaks:
 
 ```yaml
 triggers:
