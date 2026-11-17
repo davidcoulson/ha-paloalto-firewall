@@ -1191,7 +1191,8 @@ async def test_sync_nptv6_commit_without_waiting(hass: HomeAssistant, fake) -> N
         DOMAIN, "sync_nptv6_objects", call, blocking=True, return_response=True
     )
     # Returns the queued job at once, without polling it.
-    assert r["committed"] is True and r["commit"]["job"] == "77" and r["commit"]["result"] == "PEND"
+    assert r["commit_requested"] is True and r["committed"] is False  # queued, outcome not known yet
+    assert r["commit"]["job"] == "77" and r["commit"]["result"] == "PEND"
     assert sum(c.startswith("<show><jobs>") for _, c in fake.calls) == jobs_polled
 
     status = await hass.services.async_call(
@@ -2262,3 +2263,13 @@ async def test_stale_logical_router_device_removed(hass: HomeAssistant, fake) ->
     assert await hass.config_entries.async_reload(entry.entry_id)
     await hass.async_block_till_done(wait_background_tasks=True)
     assert devices.async_get(stale.id) is None
+
+
+async def test_commit_job_status_unknown_firewall(hass: HomeAssistant, fake) -> None:
+    from homeassistant.exceptions import ServiceValidationError
+
+    await _setup(hass, fake)
+    with pytest.raises(ServiceValidationError, match="No firewall named"):
+        await hass.services.async_call(
+            DOMAIN, "commit_job_status", {"job": 77, "firewall": "nope"}, blocking=True, return_response=True
+        )

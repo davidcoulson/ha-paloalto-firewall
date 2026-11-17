@@ -297,6 +297,10 @@ commit_job_status:
         number:
           min: 1
           mode: box
+    firewall:
+      example: fw-a
+      selector:
+        text:
     config_entry_id:
       selector:
         config_entry:

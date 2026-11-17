@@ -366,6 +366,10 @@
         "config_entry_id": {
           "name": "Firewall",
           "description": "Only needed if more than one firewall or pair is configured."
+        },
+        "firewall": {
+          "name": "Firewall name",
+          "description": "Hostname of the firewall that started the job, as returned by Sync NPTv6 address objects. Defaults to the active firewall."
         }
       }
     }

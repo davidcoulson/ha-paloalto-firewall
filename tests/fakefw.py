@@ -611,7 +611,7 @@ class FakePair:
         if cmd.startswith("<show><jobs><id>"):
             return (
                 OK.format(
-                    f"<job><id>77</id><status>FIN</status><result>{self.commit_result}</result>"
+                    f"<job><id>77</id><type>Commit</type><status>FIN</status><result>{self.commit_result}</result>"
                     "<details><line>Configuration committed successfully</line></details></job>"
                 ),
                 200,

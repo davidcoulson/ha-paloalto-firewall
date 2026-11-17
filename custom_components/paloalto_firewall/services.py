@@ -28,6 +28,7 @@ from .const import (
     BACKUP_DIR,
     BACKUP_KEEP,
     CMD_ARP_ALL,
+    CMD_HA_STATE,
     CMD_DHCP_LEASES,
     CMD_FIB,
     CMD_INTERFACE_ALL,
@@ -677,6 +678,7 @@ JOB_STATUS_SCHEMA = vol.Schema(
     {
         vol.Optional(ATTR_CONFIG_ENTRY_ID): cv.string,
         vol.Required("job"): vol.All(vol.Coerce(int), vol.Range(min=1)),
+        vol.Optional("firewall"): cv.string,
     }
 )
 
@@ -727,6 +729,20 @@ async def _sync_nptv6(call: ServiceCall) -> ServiceResponse:
     hass = call.hass
     entry = _get_entry(hass, call.data.get(ATTR_CONFIG_ENTRY_ID))
     network = entry.runtime_data.network
+    unit = _candidate_units(entry)[0]
+    # The cached active unit can be stale after a failover: ask the unit itself, then re-read the prefix from it.
+    try:
+        ha = parsers.parse_ha_state(await unit.client.op(CMD_HA_STATE))
+    except PanOSAuthError as err:
+        raise HomeAssistantError(f"Authentication failed: {err}") from err
+    except (PanOSError, ValueError) as err:
+        raise HomeAssistantError(f"Could not check the HA state of {unit.config.hostname}: {err}") from err
+    if ha.get("enabled") and ha.get("local_state") != "active":
+        raise HomeAssistantError(f"{unit.config.hostname} is {ha.get('local_state')}, not active; not editing its config")
+    if network:
+        await network.async_refresh()
+        if not network.last_update_success or (network.data or {}).get("unit_serial") != unit.config.serial:
+            raise HomeAssistantError("The delegated prefix could not be read from the active firewall just now; try again")
     pools = ((network.data if network else None) or {}).get("prefix_pools", {})
     pool = pools.get(call.data["pool"])
     if pool is None:
@@ -739,7 +755,6 @@ async def _sync_nptv6(call: ServiceCall) -> ServiceResponse:
     if len({name for name, _ in targets}) != len(targets):
         raise ServiceValidationError("object_64, object_60 and object_56 must be different address objects")
     vsys = call.data.get("vsys")
-    unit = _candidate_units(entry)[0]
     changes: dict[str, Any] = {}
     xpaths: dict[str, str] = {}
     try:
@@ -755,11 +770,11 @@ async def _sync_nptv6(call: ServiceCall) -> ServiceResponse:
         try:
             for name, change in changes.items():
                 if change["changed"]:
+                    edited.append(name)  # before the call: a timed-out edit may still have been applied
                     await unit.client.config(
                         "edit", xpaths[name], f"<ip-netmask>{escape(change['new'])}</ip-netmask>"
                     )
-                    edited.append(name)
-        except PanOSError:
+        except (PanOSError, asyncio.CancelledError):
             # Don't leave half the pair edited in the candidate config for the next admin commit.
             for name in edited:
                 try:
@@ -786,7 +801,9 @@ async def _sync_nptv6(call: ServiceCall) -> ServiceResponse:
             "firewall": unit.config.hostname,
             "delegated_prefix": pool["prefix"],
             "objects": changes,
-            "committed": commit is not None,
+            "commit_requested": commit is not None,
+            # Only true once the job is known to have finished OK; with wait: false check commit_job_status.
+            "committed": commit is not None and commit.get("result") == "OK",
             "commit": commit,
         }
         if call.return_response
@@ -796,7 +813,12 @@ async def _sync_nptv6(call: ServiceCall) -> ServiceResponse:
 
 async def _async_commit_job_status(call: ServiceCall) -> ServiceResponse:
     """Status of a commit job on the active unit, e.g. one sync_nptv6_objects started with wait: false."""
-    unit = _candidate_units(_get_entry(call.hass, call.data.get(ATTR_CONFIG_ENTRY_ID)))[0]
+    entry = _get_entry(call.hass, call.data.get(ATTR_CONFIG_ENTRY_ID))
+    unit = _candidate_units(entry)[0]
+    if wanted := call.data.get("firewall"):  # the firewall that owns the job, as sync_nptv6_objects returned it
+        unit = next((u for u in entry.runtime_data.units if u.config.hostname == wanted), None)
+        if unit is None:
+            raise ServiceValidationError(f"No firewall named {wanted!r} in this entry")
     job = call.data["job"]
     try:
         result = await unit.client.op(f"<show><jobs><id>{job}</id></jobs></show>")
@@ -806,6 +828,8 @@ async def _async_commit_job_status(call: ServiceCall) -> ServiceResponse:
         raise HomeAssistantError(f"Could not read job {job} on {unit.config.hostname}: {err}") from err
     if result.find("job") is None:
         raise ServiceValidationError(f"Job {job} wasn't found on {unit.config.hostname}")
+    if (result.findtext("job/type") or "").strip().lower() not in ("commit", "autocom"):
+        raise ServiceValidationError(f"Job {job} on {unit.config.hostname} is not a commit job")
     return {
         "firewall": unit.config.hostname,
         "job": str(job),
