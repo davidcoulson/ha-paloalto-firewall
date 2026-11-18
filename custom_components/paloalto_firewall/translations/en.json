@@ -327,7 +327,7 @@
         },
         "object_64": {
           "name": "/64 object",
-          "description": "Name of the address object to set to the /64."
+          "description": "Name of the address object to set to the /64. Optional."
         },
         "object_60": {
           "name": "/60 object",

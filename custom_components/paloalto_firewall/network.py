@@ -653,10 +653,10 @@ class PanOSNetworkCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             self._prev_prefix = {**stored.get("prefixes", {}), **self._prev_prefix}
         self._stored_prefixes = {}
         before = dict(self._prev_prefix)
-        current = {name: pool.get("prefix") for name, pool in pools.items()}
-        # A pool that disappeared is a change too (prefix None), as is its return.
-        for name in self._prev_prefix.keys() | current.keys():
-            prefix = current.get(name)
+        # Only a pool that is present with a prefix counts. One that is missing (the firewall drops its DHCPv6
+        # pools for minutes during a commit) keeps its last prefix, so it returning unchanged is silent.
+        current = {name: pool["prefix"] for name, pool in pools.items() if pool.get("prefix")}
+        for name, prefix in current.items():
             if name in self._prev_prefix and self._prev_prefix[name] != prefix:
                 _LOGGER.warning(
                     "Delegated prefix for %s changed: %s -> %s", name, self._prev_prefix[name], prefix

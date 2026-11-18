@@ -258,7 +258,6 @@ sync_nptv6_objects:
       selector:
         text:
     object_64:
-      required: true
       example: spectrum-npt-64
       selector:
         text:

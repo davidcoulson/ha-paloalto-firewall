@@ -149,7 +149,7 @@ For each DHCPv6 prefix-delegation pool (e.g. one per ISP), on the pair device:
 | *pool* delegated prefix | the prefix the ISP currently delegates; interface, vsys, lease, lifetimes and inherited interface addresses as attributes |
 | *pool* NPTv6 prefix mismatch | **on** when an NPTv6 rule in that WAN's vsys translates outside the delegated prefix, or translates to a single /128 interface address (interface-address Dynamic IP with no inherited prefix). `problems` lists the offending rules |
 
-`paloalto_firewall_prefix_change` fires with `pool`, `interface`, `previous_prefix` and `prefix` when an ISP hands out a new prefix (also if it changed while Home Assistant was down; `prefix` is empty if the pool disappeared, so check it before syncing), so you can get notified before IPv6 breaks:
+`paloalto_firewall_prefix_change` fires with `pool`, `interface`, `previous_prefix` and `prefix` when an ISP hands out a new prefix (also if it changed while Home Assistant was down; a pool that merely disappears, as during a firewall commit, fires nothing), so you can get notified before IPv6 breaks:
 
 ```yaml
 triggers:
@@ -234,7 +234,7 @@ The file is a normal PAN-OS config: import it under Device → Setup → Operati
 
 ## Keep NPTv6 address objects on the delegated prefix
 
-When an ISP changes your delegated /56, static NPTv6 rules stop translating into it and IPv6 breaks until the rules follow (see the *NPTv6 prefix mismatch* sensor above). `paloalto_firewall.sync_nptv6_objects` repoints two existing address objects at the right place in the current /56: `object_64` becomes the `…:ef::/64` and `object_60` the `…:f0::/60` of the pool's delegated prefix (slots `ef` and `f0` of the fourth hextet). For 2603:6011:4200:2500::/56 that is 2603:6011:4200:25ef::/64 and 2603:6011:4200:25f0::/60.
+When an ISP changes your delegated /56, static NPTv6 rules stop translating into it and IPv6 breaks until the rules follow (see the *NPTv6 prefix mismatch* sensor above). `paloalto_firewall.sync_nptv6_objects` repoints two existing address objects at the right place in the current /56: `object_64` (optional) becomes the `…:ef::/64` and `object_60` the `…:f0::/60` of the pool's delegated prefix (slots `ef` and `f0` of the fourth hextet). For 2603:6011:4200:2500::/56 that is 2603:6011:4200:25ef::/64 and 2603:6011:4200:25f0::/60.
 
 ```yaml
 action: paloalto_firewall.sync_nptv6_objects

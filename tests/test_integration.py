@@ -2278,6 +2278,16 @@ async def test_stale_logical_router_device_removed(hass: HomeAssistant, fake) ->
     assert devices.async_get(stale.id) is None
 
 
+async def test_sync_nptv6_without_slash_64_object(hass: HomeAssistant, fake) -> None:
+    shared = "/config/shared/address/entry[@name='{}']/ip-netmask"
+    fake.objects = {shared.format("npt-60"): "2001:db8:aaa:f0::/60"}
+    await _setup(hass, fake)
+    r = await hass.services.async_call(
+        DOMAIN, "sync_nptv6_objects", {"pool": "wan-b", "object_60": "npt-60"}, blocking=True, return_response=True
+    )
+    assert list(r["objects"]) == ["npt-60"] and r["objects"]["npt-60"]["new"] == "2001:db8:b00:f0::/60"
+
+
 async def test_commit_job_status_unknown_firewall(hass: HomeAssistant, fake) -> None:
     from homeassistant.exceptions import ServiceValidationError
 
