@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import importlib
+import importlib.util
 import sys
 from collections.abc import Callable
 from datetime import timedelta
@@ -27,7 +28,7 @@ from homeassistant.helpers.service import async_register_admin_service
 from homeassistant.helpers.start import async_at_started
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.typing import ConfigType
-from homeassistant.loader import async_get_integration
+from homeassistant.loader import BASE_PRELOAD_PLATFORMS
 
 from .api import PanOSClient
 from .const import (
@@ -341,6 +342,20 @@ def _remove_stale_network_entities(hass: HomeAssistant, entry: PanOSConfigEntry)
             registry.async_remove(ent.entity_id)
 
 
+def _import_code(package: str) -> None:
+    """Import the new code in the import executor, not the event loop.
+
+    After an unload HA still lists "<domain>.<platform>" as loaded, so it
+    would import the new modules in the event loop (and warn about it);
+    once they are in sys.modules its own import is a cache hit.
+    """
+    module = importlib.import_module(package)
+    # The new module's list, plus what HA preloads with a package (diagnostics, ...).
+    for name in (*module.PLATFORMS, *BASE_PRELOAD_PLATFORMS):
+        if importlib.util.find_spec(f"{package}.{name}") is not None:
+            importlib.import_module(f"{package}.{name}")
+
+
 def _forget_code(hass: HomeAssistant, package: str, domain: str) -> None:
     """Drop a package's modules so the next setup imports them from disk again.
 
@@ -370,7 +385,8 @@ def _register_reload_code(hass: HomeAssistant) -> None:
                 raise HomeAssistantError(f"{DOMAIN} did not unload; restart Home Assistant instead")
         _forget_code(hass, __name__, DOMAIN)
         try:
-            component = await (await async_get_integration(hass, DOMAIN)).async_get_component()
+            await hass.async_add_import_executor_job(_import_code, __name__)
+            component = sys.modules[__name__]
             # Registers the services again, so they run the new code
             await component.async_setup(hass, {})
         except Exception as err:
