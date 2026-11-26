@@ -91,6 +91,10 @@
     }
   },
   "services": {
+    "reload_code": {
+      "name": "Reload code",
+      "description": "For development. Unloads Palo Alto Networks Firewall, imports its Python files from disk again and sets it up, so a code change takes effect without restarting Home Assistant. Config flow and manifest changes still need a restart."
+    },
     "lookup": {
       "name": "Look up host",
       "description": "Search the active firewall's ARP table and DHCP leases by IP, MAC or hostname. Returns the matching entries.",

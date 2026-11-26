@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import importlib
+import sys
 from collections.abc import Callable
 from datetime import timedelta
 from typing import Any
@@ -15,15 +17,17 @@ from homeassistant.const import (
     CONF_VERIFY_SSL,
     EVENT_HOMEASSISTANT_STOP,
 )
-from homeassistant.core import Event, HomeAssistant, callback
-from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
+from homeassistant.core import Event, HomeAssistant, ServiceCall, callback
+from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady, HomeAssistantError
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.service import async_register_admin_service
 from homeassistant.helpers.start import async_at_started
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.typing import ConfigType
+from homeassistant.loader import async_get_integration
 
 from .api import PanOSClient
 from .const import (
@@ -68,6 +72,7 @@ CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     async_setup_services(hass)
+    _register_reload_code(hass)
     return True
 
 
@@ -334,3 +339,47 @@ def _remove_stale_network_entities(hass: HomeAssistant, entry: PanOSConfigEntry)
         elif uid.startswith(cert_prefix) and ok.get("certs_device") and uid not in cert_keep:
             # Certificate deleted or renamed in the firewall config.
             registry.async_remove(ent.entity_id)
+
+
+def _forget_code(hass: HomeAssistant, package: str, domain: str) -> None:
+    """Drop a package's modules so the next setup imports them from disk again.
+
+    Home Assistant keeps its own copy of each imported integration module
+    (hass.data["components"], keyed "<domain>" and "<domain>.<platform>") next
+    to Python's sys.modules; both have to go.
+    """
+    for cache, root in (
+        (sys.modules, package),
+        (hass.data.get("components", {}), domain),
+        (hass.data.get("missing_platforms", {}), domain),
+    ):
+        for name in [n for n in cache if n == root or n.startswith(root + ".")]:
+            del cache[name]
+    importlib.invalidate_caches()  # a file added since the last import may not be found
+
+
+@callback
+def _register_reload_code(hass: HomeAssistant) -> None:
+    """Dev: paloalto_firewall.reload_code loads the Python files from disk without a restart."""
+
+    async def _reload_code(call: ServiceCall) -> None:
+        # Disabled and ignored entries are never set up, so they are not ours to reload.
+        entries = hass.config_entries.async_entries(DOMAIN, include_ignore=False, include_disabled=False)
+        for entry in entries:
+            if not await hass.config_entries.async_unload(entry.entry_id):
+                raise HomeAssistantError(f"{DOMAIN} did not unload; restart Home Assistant instead")
+        _forget_code(hass, __name__, DOMAIN)
+        try:
+            component = await (await async_get_integration(hass, DOMAIN)).async_get_component()
+            # Registers the services again, so they run the new code
+            await component.async_setup(hass, {})
+        except Exception as err:
+            # This handler stays registered, so the action works again once the code is fixed.
+            raise HomeAssistantError(
+                f"{DOMAIN} is unloaded: the new code did not load ({err}). Fix it and call {DOMAIN}.reload_code again"
+            ) from err
+        failed = [e.title for e in entries if not await hass.config_entries.async_setup(e.entry_id)]
+        if failed:
+            raise HomeAssistantError(f"{DOMAIN} did not set up again for {failed}; see the log")
+
+    async_register_admin_service(hass, DOMAIN, "reload_code", _reload_code)

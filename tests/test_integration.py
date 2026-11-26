@@ -1,11 +1,18 @@
 import asyncio
+import sys
+from contextlib import asynccontextmanager
 from datetime import timedelta
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
+import aiohttp
 import pytest
 from homeassistant import config_entries
+from homeassistant.config_entries import ConfigEntryState
 from homeassistant.const import CONF_NAME, CONF_PASSWORD, CONF_USERNAME, CONF_VERIFY_SSL
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import (
     MockConfigEntry,
@@ -2296,3 +2303,76 @@ async def test_commit_job_status_unknown_firewall(hass: HomeAssistant, fake) -> 
         await hass.services.async_call(
             DOMAIN, "commit_job_status", {"job": 77, "firewall": "nope"}, blocking=True, return_response=True
         )
+
+
+PACKAGE = "custom_components.paloalto_firewall"
+
+
+@pytest.fixture
+def keep_modules():
+    """Put the originally imported modules back so other tests' patches still hit them."""
+    saved = {n: m for n, m in sys.modules.items() if n.startswith(PACKAGE)}
+    yield
+    for name in [n for n in sys.modules if n.startswith(PACKAGE)]:
+        del sys.modules[name]
+    sys.modules.update(saved)
+    setattr(sys.modules["custom_components"], DOMAIN, saved[PACKAGE])
+
+
+def _fake_over_http():
+    """Serve the fake firewalls from aiohttp itself.
+
+    The fake patches PanOSClient._send on the class imported now; the class
+    reload_code imports is another object, and only the HTTP layer is shared.
+    """
+    fake_send = sys.modules[PACKAGE + ".api"].PanOSClient._send
+
+    @asynccontextmanager
+    async def post(session, url, *, data, headers, timeout, **kwargs):
+        client = SimpleNamespace(host=url.split("/")[2])
+        text, status = await fake_send(client, data, headers, timeout.total)
+        yield SimpleNamespace(status=status, text=AsyncMock(return_value=text))
+
+    return patch("aiohttp.ClientSession.post", post)
+
+
+async def test_reload_code_replaces_the_modules(hass: HomeAssistant, fake, keep_modules) -> None:
+    """reload_code re-imports the package, runs async_setup again, sets the entry up."""
+    entry = await _setup(hass, fake)
+    old = sys.modules[PACKAGE]
+    old_unit = entry.runtime_data.units[0]
+    hass.services.async_remove(DOMAIN, "lookup")  # async_setup must bring it back
+
+    with _fake_over_http():
+        await hass.services.async_call(DOMAIN, "reload_code", {}, blocking=True)
+        await hass.async_block_till_done(wait_background_tasks=True)
+
+    assert sys.modules[PACKAGE] is not old
+    assert entry.state is ConfigEntryState.LOADED
+    unit = entry.runtime_data.units[0]
+    assert unit.coordinator.data is not None
+    assert type(unit.coordinator) is sys.modules[PACKAGE + ".coordinator"].PanOSDeviceCoordinator
+    assert type(unit.coordinator) is not type(old_unit.coordinator)
+    assert type(unit.client) is not type(old_unit.client)
+    assert hass.services.has_service(DOMAIN, "reload_code")
+    handler = hass.services.async_services_internal()[DOMAIN]["lookup"]
+    assert handler.job.target.__globals__ is vars(sys.modules[PACKAGE + ".services"])
+
+
+async def test_reload_code_reports_new_code_that_does_not_set_up(
+    hass: HomeAssistant, fake, keep_modules
+) -> None:
+    """A failed setup after the re-import is an error, and the action stays to retry with."""
+    entry = await _setup(hass, fake)
+
+    with (
+        pytest.raises(HomeAssistantError, match="did not set up again"),
+        patch(
+            "aiohttp.ClientSession.post", side_effect=aiohttp.ClientConnectionError("no firewall in tests")
+        ),
+    ):
+        await hass.services.async_call(DOMAIN, "reload_code", {}, blocking=True)
+    await hass.async_block_till_done()
+
+    assert entry.state is ConfigEntryState.SETUP_RETRY
+    assert hass.services.has_service(DOMAIN, "reload_code")
