@@ -1,11 +1,16 @@
 import asyncio
+import sys
 from datetime import timedelta
+from unittest.mock import patch
 
+import aiohttp
 import pytest
 from homeassistant import config_entries
+from homeassistant.config_entries import ConfigEntryState
 from homeassistant.const import CONF_NAME, CONF_PASSWORD, CONF_USERNAME, CONF_VERIFY_SSL
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import (
     MockConfigEntry,
@@ -2296,3 +2301,36 @@ async def test_commit_job_status_unknown_firewall(hass: HomeAssistant, fake) -> 
         await hass.services.async_call(
             DOMAIN, "commit_job_status", {"job": 77, "firewall": "nope"}, blocking=True, return_response=True
         )
+
+
+@pytest.fixture
+def keep_modules():
+    """Put the originally imported modules back so other tests' patches still hit them."""
+    prefix = "custom_components.paloalto_firewall"
+    saved = {n: m for n, m in sys.modules.items() if n.startswith(prefix)}
+    yield
+    for name in [n for n in sys.modules if n.startswith(prefix)]:
+        del sys.modules[name]
+    sys.modules.update(saved)
+
+
+async def test_reload_code_replaces_the_modules(hass: HomeAssistant, fake, keep_modules) -> None:
+    """reload_code re-imports the package, runs async_setup again, sets the entry up."""
+    entry = await _setup(hass, fake)
+    assert entry.state is ConfigEntryState.LOADED
+    old = sys.modules["custom_components.paloalto_firewall"]
+    hass.services.async_remove(DOMAIN, "lookup")  # async_setup must bring it back
+
+    # The fake patches the old PanOSClient, so the new code runs unmocked: it cannot
+    # reach a firewall, the entry ends in SETUP_RETRY and the action says so.
+    with (
+        pytest.raises(HomeAssistantError, match="did not set up again"),
+        patch("aiohttp.ClientSession.post", side_effect=aiohttp.ClientConnectionError("no firewall in tests")),
+    ):
+        await hass.services.async_call(DOMAIN, "reload_code", {}, blocking=True)
+    await hass.async_block_till_done()
+
+    assert sys.modules["custom_components.paloalto_firewall"] is not old
+    assert entry.state is ConfigEntryState.SETUP_RETRY
+    assert hass.services.has_service(DOMAIN, "reload_code")
+    assert hass.services.has_service(DOMAIN, "lookup")
