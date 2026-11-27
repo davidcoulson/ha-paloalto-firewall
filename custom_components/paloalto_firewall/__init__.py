@@ -6,9 +6,11 @@ import asyncio
 import hashlib
 import importlib
 import importlib.util
+import json
 import sys
 from collections.abc import Callable
 from datetime import timedelta
+from pathlib import Path
 from typing import Any
 
 from homeassistant.const import (
@@ -23,6 +25,7 @@ from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady,
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.service import async_register_admin_service
 from homeassistant.helpers.start import async_at_started
@@ -241,6 +244,7 @@ async def _async_setup_entry(hass: HomeAssistant, entry: PanOSConfigEntry, units
 
     entry.async_on_unload(async_at_started(hass, _start_slow_reads))
 
+    _clear_marketplace_restart(hass)
     return True
 
 
@@ -371,6 +375,26 @@ def _forget_code(hass: HomeAssistant, package: str, domain: str) -> None:
         for name in [n for n in cache if n == root or n.startswith(root + ".")]:
             del cache[name]
     importlib.invalidate_caches()  # a file added since the last import may not be found
+
+
+_CODE_VERSION = json.loads((Path(__file__).parent / "manifest.json").read_text())["version"]
+
+
+def _clear_marketplace_restart(hass: HomeAssistant) -> None:
+    """Drop Marketplace's "restart to finish the update" repairs for Palo Alto Firewall.
+
+    Marketplace cannot see reload_code, so they would stay until a restart. Called from
+    entry setup, it uses the new code's version even when the old handler did the reload;
+    a repair for any other version still waits.
+    """
+    for (domain, issue_id), issue in list(ir.async_get(hass).issues.items()):
+        if (
+            domain == "marketplace"
+            and issue_id.startswith("restart_required_")
+            and issue.issue_domain == DOMAIN
+            and issue_id.rsplit("/", 1)[-1].removeprefix("v") == _CODE_VERSION
+        ):
+            ir.async_delete_issue(hass, domain, issue_id)
 
 
 @callback
