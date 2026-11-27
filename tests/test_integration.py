@@ -2376,3 +2376,31 @@ async def test_reload_code_reports_new_code_that_does_not_set_up(
 
     assert entry.state is ConfigEntryState.SETUP_RETRY
     assert hass.services.has_service(DOMAIN, "reload_code")
+
+
+def test_reload_clears_only_marketplaces_paloalto_firewall_restart_repairs(hass: HomeAssistant):
+    from homeassistant.helpers import issue_registry as ir
+
+    from custom_components.paloalto_firewall import _clear_marketplace_restart
+
+    for domain, issue_id, issue_domain in (
+        ("marketplace", "restart_required_1_tags/2026.11.27.2", "paloalto_firewall"),
+        ("marketplace", "restart_required_2_tags/2026.11.26.01", "ssh"),
+        ("marketplace", "critical_x", "paloalto_firewall"),
+        ("paloalto_firewall", "restart_required_x", "paloalto_firewall"),
+    ):
+        ir.async_create_issue(
+            hass,
+            domain,
+            issue_id,
+            is_fixable=False,
+            severity=ir.IssueSeverity.WARNING,
+            translation_key="x",
+            issue_domain=issue_domain,
+        )
+    _clear_marketplace_restart(hass)
+    assert set(ir.async_get(hass).issues) == {
+        ("marketplace", "restart_required_2_tags/2026.11.26.01"),
+        ("marketplace", "critical_x"),
+        ("paloalto_firewall", "restart_required_x"),
+    }
